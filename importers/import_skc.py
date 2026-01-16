@@ -40,8 +40,9 @@ class SKCImporter:
             print(f"Error loading SKC file: {e}")
             return None
         
-        # KEY FIX: Force Rest Pose to match Frame 0
-        self._fix_rest_pose()
+        # NOTE: Rest pose is now fixed at data level in import_skd via skd_patcher.
+        # The following call is disabled to avoid double-fixing which causes conflicts.
+        # self._fix_rest_pose()
         
         # Create Animation Action
         action_name = os.path.splitext(os.path.basename(self.filepath))[0]

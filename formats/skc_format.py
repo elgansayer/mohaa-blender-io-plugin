@@ -22,8 +22,14 @@ SKC_IDENT = b'SKAN'  # (*(int *)"SKAN") = 0x4E414B53
 SKC_IDENT_INT = 0x4E414B53
 
 # Supported versions
+SKC_VERSION_MOHSH = 10  # Medal of Honor: Spearhead
+SKC_VERSION_MOHBT = 11  # Medal of Honor: Breakthrough
+SKC_VERSION_MOHSH2 = 12  # Some Spearhead animations
 SKC_VERSION_OLD = 13  # TIKI_SKC_HEADER_OLD_VERSION
 SKC_VERSION_CURRENT = 14  # TIKI_SKC_HEADER_VERSION
+
+# All known/supported versions
+SKC_SUPPORTED_VERSIONS = (10, 11, 12, 13, 14)
 
 # Channel name max length
 MAX_CHANNEL_NAME = 32
@@ -270,17 +276,36 @@ class SKCAnimation:
     def read_from_bytes(cls, data: bytes) -> 'SKCAnimation':
         """Read complete SKC animation from bytes"""
         f = BytesIO(data)
-        file_start = 0
         
-        # Read header
-        header = SKCHeader.read(f)
+        # First, peek at ident and version
+        ident_data = f.read(8)  # ident + version
+        ident, version = struct.unpack('<ii', ident_data)
         
-        # Validate header
-        if header.ident != SKC_IDENT_INT:
-            raise ValueError(f"Invalid SKC file identifier: {header.ident:08x}")
+        # Validate ident
+        if ident != SKC_IDENT_INT:
+            raise ValueError(f"Invalid SKC file identifier: {ident:08x}")
         
-        if header.version not in (SKC_VERSION_OLD, SKC_VERSION_CURRENT):
-            raise ValueError(f"Unsupported SKC version: {header.version}")
+        # Check version and determine header format
+        if version in (10, 11, 12):
+            # Old format: has 64-byte filename after version
+            # Format: [ident:4][version:4][filename:64][...rest of header]
+            header = cls._read_old_header(f, ident, version)
+            header_size = 8 + 64 + 40  # ident+ver + filename + rest of old header
+        elif version in (13, 14):
+            # New format: standard header
+            f.seek(0)
+            header = SKCHeader.read(f)
+            header_size = SKC_HEADER_SIZE
+        else:
+            # Unknown version - try old format first, then new
+            print(f"Warning: Unknown SKC version {version}, attempting to parse")
+            f.seek(0)
+            header = SKCHeader.read(f)
+            header_size = SKC_HEADER_SIZE
+        
+        if header.num_frames == 0 or header.num_channels == 0:
+            # Empty animation, return early
+            return cls(header=header, frames=[], channels=[], channel_data=[])
         
         # Read frame headers
         frames = []
@@ -289,22 +314,19 @@ class SKCAnimation:
         
         # Read channel names
         channels = []
-        f.seek(header.ofs_channel_names)
-        for _ in range(header.num_channels):
-            name_data = f.read(SKC_CHANNEL_NAME_SIZE)
-            name = name_data.rstrip(b'\x00').decode('latin-1')
-            channels.append(SKCChannel.from_name(name))
+        if header.ofs_channel_names > 0:
+            f.seek(header.ofs_channel_names)
+            for _ in range(header.num_channels):
+                name_data = f.read(SKC_CHANNEL_NAME_SIZE)
+                name = name_data.rstrip(b'\x00').decode('latin-1')
+                channels.append(SKCChannel.from_name(name))
         
         # Read channel data for each frame
-        # Channel data is stored after the header + frame headers
-        # Each frame has num_channels * 16 bytes of channel data
-        channel_data_start = SKC_HEADER_SIZE + (header.num_frames * SKC_FRAME_SIZE)
+        channel_data_start = header_size + (header.num_frames * SKC_FRAME_SIZE)
         
         channel_data = []
         for frame_idx, frame in enumerate(frames):
             frame_channels = []
-            # Calculate offset to this frame's channel data
-            # In the file format, channel data follows all frame headers
             frame_channel_offset = channel_data_start + (frame_idx * header.num_channels * SKC_CHANNEL_DATA_SIZE)
             f.seek(frame_channel_offset)
             
@@ -318,6 +340,90 @@ class SKCAnimation:
             frames=frames,
             channels=channels,
             channel_data=channel_data
+        )
+    
+    @classmethod
+    def _read_old_header(cls, f: BytesIO, ident: int, version: int) -> 'SKCHeader':
+        """Read old-format SKC header (versions 10-12)
+        
+        Old format layout (analyzed from hex dump):
+        - Offset 0: ident (4 bytes) = 'SKAN'
+        - Offset 4: version (4 bytes) = 10/11/12
+        - Offset 8: filename (64 bytes, null-padded)
+        - Offset 72: padding/garbage (4 bytes)
+        - Offset 76: flags or similar (4 bytes)
+        - Offset 80: frameTime (4 bytes, float)
+        - Offset 84: totalDelta (12 bytes, 3 floats)
+        - Offset 96: ofsChannelData (4 bytes)
+        - Offset 100: ofsChannelInfo (4 bytes) - contains numChannels, numFrames, then channel names
+        - Offset 104: unused (4 bytes)
+        - Offset 108: numFrames (4 bytes)
+        
+        At ofsChannelInfo:
+        - numChannels (4 bytes)
+        - numFrames (4 bytes)
+        - channel names (32 bytes each)
+        """
+        # Skip filename (64 bytes, already read ident+version)
+        filename_data = f.read(64)  # offset 8-72
+        
+        # Read header fields starting at offset 72
+        header_data = f.read(40)  # Read 40 bytes: offsets 72-112
+        
+        try:
+            # Parse the header structure
+            unpacked = struct.unpack('<iiffffiiiii', header_data[:44] if len(header_data) >= 44 else header_data + b'\x00' * (44 - len(header_data)))
+            
+            # Field mapping based on hex dump analysis
+            padding = unpacked[0]          # offset 72: garbage/padding
+            flags = unpacked[1]            # offset 76: flags (or nBytesUsed)
+            frame_time = unpacked[2]       # offset 80: frameTime
+            total_delta = (unpacked[3], unpacked[4], unpacked[5])  # offset 84-96: totalDelta
+            ofs_channel_data = unpacked[6]  # offset 96: where channel data starts
+            ofs_channel_info = unpacked[7]  # offset 100: secondary info block
+            unused = unpacked[8]            # offset 104: unused
+            num_frames = unpacked[9]        # offset 108: numFrames
+            
+            # Read numChannels from the secondary info block (if ofsChannelInfo is valid)
+            num_channels = 0
+            ofs_channel_names = ofs_channel_info + 8  # Skip numChannels + numFrames
+            
+            if ofs_channel_info > 0:
+                current_pos = f.tell()
+                f.seek(ofs_channel_info)
+                info_data = f.read(8)
+                if len(info_data) == 8:
+                    num_channels, num_frames_check = struct.unpack('<ii', info_data)
+                    # Use this as the actual offset for channel names
+                    ofs_channel_names = ofs_channel_info + 8
+                f.seek(current_pos)
+            
+            # Sanity checks
+            if num_frames < 0 or num_frames > 100000:
+                num_frames = 0
+            if num_channels < 0 or num_channels > 1000:
+                num_channels = 0
+                
+        except Exception as e:
+            print(f"Warning: Could not parse old SKC header: {e}")
+            flags = 0
+            frame_time = 0.05
+            total_delta = (0, 0, 0)
+            num_channels = 0
+            ofs_channel_names = 0
+            num_frames = 0
+        
+        return SKCHeader(
+            ident=ident,
+            version=version,
+            flags=flags,
+            n_bytes_used=0,
+            frame_time=frame_time,
+            total_delta=total_delta,
+            total_angle_delta=0,
+            num_channels=num_channels,
+            ofs_channel_names=ofs_channel_names,
+            num_frames=num_frames
         )
     
     def get_channel_by_name(self, name: str) -> Optional[int]:

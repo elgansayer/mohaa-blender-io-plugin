@@ -69,6 +69,7 @@ class SKDImporter:
         self.armature_obj: Optional[bpy.types.Object] = None
         self.mesh_obj: Optional[bpy.types.Object] = None
         self.bone_name_map: Dict[str, str] = {}  # Original name -> Blender name
+        self.bone_world_positions: Dict[int, Tuple[float, float, float]] = {}  # bone_index -> world pos (RAW)
     
     def execute(self) -> Tuple[Optional[bpy.types.Object], Optional[bpy.types.Object]]:
         """
@@ -105,6 +106,14 @@ class SKDImporter:
 
         # Create armature first
         if self.model.bones:
+            # CRITICAL: Calculate bone world positions BEFORE creating armature
+            # This uses SKC Frame 0 to get correct bone matrices
+            self._calculate_bone_world_positions()
+            
+            # NOTE: We no longer use apply_skc_rest_pose patcher - it conflicts
+            # with the matrix-based approach. The vertex positions are now
+            # calculated correctly using bone world matrices in _create_mesh.
+            
             self.armature_obj = self._create_armature(model_name)
         
         # Create mesh
@@ -149,6 +158,103 @@ class SKDImporter:
         if self.flip_uvs:
             return (u, 1.0 - v)
         return (u, v)
+    
+    def _calculate_bone_world_positions(self):
+        """
+        Calculate world transforms for all bones using SKC Frame 0 data.
+        Uses rotation matrices from SKC quaternions with the Quake-style convention.
+        For bones without SKC position channels, uses SKD offset.
+        
+        Stores results in self.bone_world_matrices (Dict[int, (pos, rot_3x3)])
+        and self.bone_world_positions (Dict[int, Tuple[float,float,float]]) for backward compat.
+        """
+        if not self.model or not self.model.bones:
+            return
+        
+        # Initialize matrices dict
+        self.bone_world_matrices = {}  # bone_idx -> (world_pos_array, world_rot_3x3)
+        
+        # Parse SKC channels if we have an SKC file
+        skc_channels = {}
+        skc_anim = None
+        if self.skc_filepath and os.path.exists(self.skc_filepath):
+            try:
+                skc_anim = SKCAnimation.read(self.skc_filepath)
+                from ..formats.skc_format import CHANNEL_POSITION, CHANNEL_ROTATION, get_bone_name_from_channel
+                for i, ch in enumerate(skc_anim.channels):
+                    bone_name = get_bone_name_from_channel(ch.name)
+                    if bone_name not in skc_channels:
+                        skc_channels[bone_name] = {'pos': None, 'rot': None}
+                    if ch.channel_type == CHANNEL_POSITION:
+                        skc_channels[bone_name]['pos'] = i
+                    elif ch.channel_type == CHANNEL_ROTATION:
+                        skc_channels[bone_name]['rot'] = i
+            except Exception as e:
+                print(f"Warning: Could not load SKC for bone matrices: {e}")
+        
+        # Build name-to-index map
+        name_to_idx = {bone.name: idx for idx, bone in enumerate(self.model.bones)}
+        
+        def quat_to_matrix_quake(w, x, y, z):
+            """Quake-engine style quaternion to rotation matrix"""
+            import math
+            n = math.sqrt(w*w + x*x + y*y + z*z)
+            if n > 0: w, x, y, z = w/n, x/n, y/n, z/n
+            return Matrix([
+                [1-2*(y*y+z*z), 2*(x*y+z*w), 2*(x*z-y*w)],
+                [2*(x*y-z*w), 1-2*(x*x+z*z), 2*(y*z+x*w)],
+                [2*(x*z+y*w), 2*(y*z-x*w), 1-2*(x*x+y*y)]
+            ])
+        
+        def get_local_transform(bone_name):
+            """Get local (position, rotation_matrix) for a bone"""
+            bone_idx = name_to_idx.get(bone_name)
+            bone = self.model.bones[bone_idx] if bone_idx is not None else None
+            
+            # Default: Use SKD offset, identity rotation
+            if bone:
+                pos = Vector(bone.offset)
+            else:
+                pos = Vector((0, 0, 0))
+            rot = Matrix.Identity(3)
+            
+            # Override with SKC Frame 0 data if available
+            if skc_anim and bone_name in skc_channels:
+                data = skc_channels[bone_name]
+                if data['pos'] is not None:
+                    raw_pos = skc_anim.channel_data[0][data['pos']].as_position
+                    pos = Vector(raw_pos)
+                if data['rot'] is not None:
+                    raw_rot = skc_anim.channel_data[0][data['rot']].as_quaternion
+                    # SKC quaternion is (x, y, z, w)
+                    x, y, z, w = raw_rot
+                    rot = quat_to_matrix_quake(w, x, y, z)
+            
+            return pos, rot
+        
+        def calc_world(bone_idx, parent_pos, parent_rot):
+            """Calculate world transform for a bone and its children"""
+            bone = self.model.bones[bone_idx]
+            local_pos, local_rot = get_local_transform(bone.name)
+            
+            # World = Parent @ Local
+            world_rot = parent_rot @ local_rot
+            world_pos = parent_pos + parent_rot @ local_pos
+            
+            # Store matrices (as Vector and Matrix)
+            self.bone_world_matrices[bone_idx] = (world_pos.copy(), world_rot.copy())
+            # Also store position tuple for backward compatibility
+            self.bone_world_positions[bone_idx] = tuple(world_pos)
+            
+            # Find children and recurse
+            for child_idx, child_bone in enumerate(self.model.bones):
+                if child_bone.parent == bone.name:
+                    calc_world(child_idx, world_pos, world_rot)
+        
+        # Start from roots
+        for idx, bone in enumerate(self.model.bones):
+            if not bone.parent or bone.parent.lower() == 'worldbone':
+                calc_world(idx, Vector((0, 0, 0)), Matrix.Identity(3))
     
     def _find_texture(self, shader_name: str) -> Optional[str]:
         """
@@ -321,8 +427,15 @@ class SKDImporter:
             created_bones[bone_name] = edit_bone
             self.bone_name_map[bone_name] = bone_name
             
-            # Set bone position from offset
-            head_pos = self._transform_position(bone_data.offset)
+            # Set bone position - use pre-calculated world position if available
+            bone_idx = bone_indices.get(bone_name, -1)
+            if bone_idx in self.bone_world_positions:
+                # Use SKC Frame 0 world position
+                raw_pos = self.bone_world_positions[bone_idx]
+                head_pos = self._transform_position(raw_pos)
+            else:
+                # Fallback to SKD offset (shouldn't happen for bones with SKC data)
+                head_pos = self._transform_position(bone_data.offset)
             edit_bone.head = head_pos
             
             # Set tail slightly offset (bones need length)
@@ -365,23 +478,30 @@ class SKDImporter:
         for surf_idx, surface in enumerate(self.model.surfaces):
             # Process vertices
             for vertex in surface.vertices:
-                # Calculate position from weighted bone offsets
-                # Formula: vertex_world = sum(weight * (bone_pos + weight_offset))
-                pos = [0.0, 0.0, 0.0]
+                # Calculate position using bone matrices
+                # Formula: vertex = sum((bone_rotation @ weight_offset + bone_position) * weight)
+                # This is the exact formula from the OpenMOHAA C++ renderer
+                pos = Vector((0.0, 0.0, 0.0))
+                
                 for weight in vertex.weights:
                     bone_idx = weight.bone_index
-                    if bone_idx < len(self.model.bones):
-                        bone = self.model.bones[bone_idx]
-                        bone_offset = bone.offset  # Bone's world position
-                        # Vertex world = bone_world + weight_local (weighted)
-                        pos[0] += weight.bone_weight * (bone_offset[0] + weight.offset[0])
-                        pos[1] += weight.bone_weight * (bone_offset[1] + weight.offset[1])
-                        pos[2] += weight.bone_weight * (bone_offset[2] + weight.offset[2])
+                    if bone_idx in self.bone_world_matrices:
+                        # Get bone world transform
+                        bone_world_pos, bone_world_rot = self.bone_world_matrices[bone_idx]
+                        
+                        # Transform: rotate offset by bone matrix, then add bone position
+                        offset = Vector(weight.offset)
+                        rotated_offset = bone_world_rot @ offset
+                        vertex_world = rotated_offset + bone_world_pos
+                        
+                        pos += vertex_world * weight.bone_weight
+                    elif bone_idx in self.bone_world_positions:
+                        # Fallback: just position (no rotation)
+                        bone_world = self.bone_world_positions[bone_idx]
+                        pos += (Vector(bone_world) + Vector(weight.offset)) * weight.bone_weight
                     else:
-                        # Fallback: just use weight offset
-                        pos[0] += weight.bone_weight * weight.offset[0]
-                        pos[1] += weight.bone_weight * weight.offset[1]
-                        pos[2] += weight.bone_weight * weight.offset[2]
+                        # Last fallback: just use weight offset
+                        pos += Vector(weight.offset) * weight.bone_weight
                 
                 all_verts.append(self._transform_position(tuple(pos)))
                 all_normals.append(self._transform_normal(vertex.normal))
