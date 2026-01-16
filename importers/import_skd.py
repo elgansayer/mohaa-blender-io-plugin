@@ -19,6 +19,8 @@ from typing import Dict, List, Tuple, Optional
 import os
 import glob
 
+# Relative imports
+from ..utils.tik_parser import TikParser, find_tik_for_skd
 from ..formats.skd_format import (
     SKDModel, SKDHeader, SKDSurfaceData, SKDVertex, 
     SKDWeight, SKDBoneFileData, SKELBONE_POSROT
@@ -54,6 +56,7 @@ class SKDImporter:
         self.scale = scale
         self.textures_path = textures_path
         self.shader_map = shader_map or {}
+        self.surface_lookup = {}  # Map surface_name -> shader_name from TIK
         
         self.model: Optional[SKDModel] = None
         self.armature_obj: Optional[bpy.types.Object] = None
@@ -77,6 +80,22 @@ class SKDImporter:
         # Get model name from file
         model_name = os.path.splitext(os.path.basename(self.filepath))[0]
         
+        # Try to load TIK file for surface mapping
+        if self.filepath:
+            tik_path = find_tik_for_skd(self.filepath)
+            if tik_path:
+                print(f"Found associated TIK: {tik_path}")
+                try:
+                    # Use textures_path as game_path if available
+                    game_path = self.textures_path
+                    tik_parser = TikParser(game_path)
+                    tik_parser.parse_file(tik_path)
+                    self.surface_lookup = tik_parser.get_mapping()
+                    if self.surface_lookup:
+                        print(f"Loaded {len(self.surface_lookup)} surface mappings from TIK")
+                except Exception as e:
+                    print(f"Warning: Failed to parse TIK: {e}")
+
         # Create armature first
         if self.model.bones:
             self.armature_obj = self._create_armature(model_name)
@@ -133,11 +152,17 @@ class SKDImporter:
         if not shader_name:
             return None
         
-        # First check shader map for texture path resolution
-        texture_path = shader_name
-        if self.shader_map and shader_name in self.shader_map:
-            texture_path = self.shader_map[shader_name]
-            print(f"  Shader '{shader_name}' -> '{texture_path}'")
+        # First check TIK mapping (Surface -> Shader)
+        resolved_shader = shader_name
+        if self.surface_lookup and shader_name in self.surface_lookup:
+            resolved_shader = self.surface_lookup[shader_name]
+            # print(f"  Surface '{shader_name}' -> Shader '{resolved_shader}'")
+        
+        # Then check shader map for texture path (Shader -> Texture)
+        texture_path = resolved_shader
+        if self.shader_map and resolved_shader in self.shader_map:
+            texture_path = self.shader_map[resolved_shader]
+            print(f"  Shader '{resolved_shader}' -> '{texture_path}'")
         
         if not self.textures_path:
             return None
@@ -158,6 +183,10 @@ class SKDImporter:
                 os.path.join(base_path, 'textures'),
                 os.path.join(base_path, 'models'),
                 os.path.join(base_path, 'skins'),
+                # Support for EXISTING-DATA subdirectory structure
+                os.path.join(base_path, 'EXISTING-DATA'),
+                os.path.join(base_path, 'EXISTING-DATA', 'textures'),
+                os.path.join(base_path, 'EXISTING-DATA', 'models'),
             ])
         
         # Check if texture_path already has an extension
