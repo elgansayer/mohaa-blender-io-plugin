@@ -25,6 +25,10 @@ from ..formats.skd_format import (
     SKDModel, SKDHeader, SKDSurfaceData, SKDVertex, 
     SKDWeight, SKDBoneFileData, SKELBONE_POSROT
 )
+# Patch Helper
+from ..formats.skc_format import SKCAnimation
+from .skd_patcher import apply_skc_rest_pose
+
 
 
 class SKDImporter:
@@ -38,7 +42,8 @@ class SKDImporter:
                  swap_yz: bool = False,
                  scale: float = 1.0,
                  textures_path: str = "",
-                 shader_map: Optional[Dict[str, str]] = None):
+                 shader_map: Optional[Dict[str, str]] = None,
+                 skc_filepath: str = None):
         """
         Initialize importer.
         
@@ -49,6 +54,7 @@ class SKDImporter:
             scale: Global scale factor
             textures_path: Base path to search for textures (e.g., game's main folder)
             shader_map: Dictionary mapping shader names to texture paths
+            skc_filepath: Optional path to matching SKC file for rest pose correction
         """
         self.filepath = filepath
         self.flip_uvs = flip_uvs
@@ -56,6 +62,7 @@ class SKDImporter:
         self.scale = scale
         self.textures_path = textures_path
         self.shader_map = shader_map or {}
+        self.skc_filepath = skc_filepath
         self.surface_lookup = {}  # Map surface_name -> shader_name from TIK
         
         self.model: Optional[SKDModel] = None
@@ -108,19 +115,23 @@ class SKDImporter:
             if self.armature_obj and self.mesh_obj:
                 self.mesh_obj.parent = self.armature_obj
                 
+                # Add Armature modifier so mesh deforms with bones
+                armature_mod = self.mesh_obj.modifiers.new(name="Armature", type='ARMATURE')
+                armature_mod.object = self.armature_obj
+                
         
         return self.armature_obj, self.mesh_obj
     
     def _transform_position(self, pos: Tuple[float, float, float]) -> Vector:
         """Transform position from MoHAA to Blender coordinates"""
+        # MoHAA: Y-forward, Z-up
+        # Blender: Y-back, Z-up  
+        # Transform: (X, Y, Z) -> (X, -Z, Y)
         x, y, z = pos
-        
         if self.swap_yz:
-            # Swap Y and Z, negate new Y
             return Vector((x * self.scale, -z * self.scale, y * self.scale))
         else:
-            # Just negate Y (most common for Quake derivatives)
-            return Vector((x * self.scale, -y * self.scale, z * self.scale))
+            return Vector((x * self.scale, y * self.scale, z * self.scale))
     
     def _transform_normal(self, normal: Tuple[float, float, float]) -> Vector:
         """Transform normal vector from MoHAA to Blender coordinates"""
@@ -129,7 +140,7 @@ class SKDImporter:
         if self.swap_yz:
             return Vector((x, -z, y)).normalized()
         else:
-            return Vector((x, -y, z)).normalized()
+            return Vector((x, y, z)).normalized()
     
     def _transform_uv(self, uv: Tuple[float, float]) -> Tuple[float, float]:
         """Transform UV coordinates for Blender"""
@@ -331,6 +342,9 @@ class SKDImporter:
         # Exit edit mode
         bpy.ops.object.mode_set(mode='OBJECT')
         
+        # NOTE: WE DO NOT ROTATE OBJECT ANYMORE
+        # Data is transformed during import.
+        
         return armature_obj
     
     def _create_mesh(self, name: str) -> bpy.types.Object:
@@ -459,7 +473,8 @@ def import_skd(filepath: str,
                swap_yz: bool = False,
                scale: float = 1.0,
                textures_path: str = "",
-               shader_map: Optional[Dict[str, str]] = None) -> Tuple[Optional[bpy.types.Object], Optional[bpy.types.Object]]:
+               shader_map: Optional[Dict[str, str]] = None,
+               skc_filepath: str = None) -> Tuple[Optional[bpy.types.Object], Optional[bpy.types.Object]]:
     """
     Import an SKD file.
     
@@ -470,9 +485,10 @@ def import_skd(filepath: str,
         scale: Global scale factor
         textures_path: Base path to search for textures
         shader_map: Dictionary mapping shader names to texture paths
+        skc_filepath: Optional path to matching SKC file for rest pose correction
         
     Returns:
         Tuple of (armature_object, mesh_object)
     """
-    importer = SKDImporter(filepath, flip_uvs, swap_yz, scale, textures_path, shader_map)
+    importer = SKDImporter(filepath, flip_uvs, swap_yz, scale, textures_path, shader_map, skc_filepath)
     return importer.execute()

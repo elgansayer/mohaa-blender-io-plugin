@@ -9,6 +9,6 @@ find /home/elgan/dev/mohaa_skd_skc -name "*.pyc" -delete 2>/dev/null
 echo "✓ Cache cleared!"
 echo ""
 echo "Now restart Blender for changes to take effect."
-xclip -selection clipboard -i < /home/elgan/.local/share/openmohaa/main/EXISTING-DATA/models/furniture/wardrobe/wardrobe.skd
+echo "/home/elgan/.local/share/openmohaa/main/EXISTING-DATA/models/human/" | xclip -selection clipboard
 blender
 # copy /home/elgan/.local/share/openmohaa/main/EXISTING-DATA/models/furniture/wardrobe/wardrobe.skd to clipboard

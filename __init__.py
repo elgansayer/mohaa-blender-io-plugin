@@ -130,6 +130,12 @@ class IMPORT_OT_skd(Operator, ImportHelper):
         default=True,
     )
     
+    auto_import_skc: BoolProperty(
+        name="Auto-Import Animation",
+        description="Automatically import matching .skc animation file if it exists",
+        default=True,
+    )
+    
     def _find_game_path_from_file(self):
         """Try to find game data path from the SKD file location"""
         # Walk up directory tree looking for scripts/ or textures/ folder
@@ -174,17 +180,59 @@ class IMPORT_OT_skd(Operator, ImportHelper):
             except Exception as e:
                 print(f"Warning: Could not parse shaders: {e}")
         
+        # Helper to find SKC path
+        skc_path = None
+        if self.auto_import_skc:
+            skd_dir = os.path.dirname(self.filepath)
+            skd_basename = os.path.splitext(os.path.basename(self.filepath))[0]
+            check_path = os.path.join(skd_dir, skd_basename + ".skc")
+            if os.path.exists(check_path):
+                skc_path = check_path
+        
         armature, mesh = import_skd(
-            self.filepath,
+            self.filepath, 
             flip_uvs=self.flip_uvs,
-            swap_yz=self.swap_yz,
+            swap_yz=self.swap_yz, 
             scale=self.scale,
             textures_path=textures_path,
             shader_map=shader_map,
+            skc_filepath=skc_path
         )
         
+        # Check for matching SKC file and auto-import (Animation Data)
+        if armature and skc_path:
+            try:
+                print(f"[AUTO-IMPORT] Loading Animation: {skc_path}")
+                # Set armature as active for animation import
+                armature.select_set(True)
+                context.view_layer.objects.active = armature
+                
+                from .importers.import_skc import import_skc
+                
+                # NOTE: import_skc also tries to fix Rest Pose (using viewport modifier trick).
+                # Since we already patched the data in import_skd, the skeleton is ALREADY in the "Frame 0" shape (approx).
+                # So forcing Rest Pose again is redundant but harmless (Delta should be near-zero).
+                # HOWEVER, the modifier trick relies on modifiers being present. 
+                # import_skd creates objects/meshes.
+                # So it should be fine.
+                
+                action = import_skc(skc_path, armature, self.swap_yz, self.scale)
+                
+                if action:
+                    print(f"[AUTO-IMPORT] Success! Action: {action.name}")
+                    self.report({'INFO'}, f"Imported SKD and auto-loaded animation: {os.path.basename(skc_path)}")
+                else:
+                    self.report({'WARNING'}, "Auto-import returned no action")
+            except Exception as e:
+                print(f"[AUTO-IMPORT] Exception: {e}")
+                import traceback
+                traceback.print_exc()
+                self.report({'WARNING'}, f"Failed to auto-import SKC: {e}")
+        else:
+             if armature:
+                 self.report({'INFO'}, f"Imported SKD: {os.path.basename(self.filepath)}")
+        
         if armature or mesh:
-            self.report({'INFO'}, f"Imported SKD: {os.path.basename(self.filepath)}")
             return {'FINISHED'}
         else:
             self.report({'ERROR'}, "Failed to import SKD file")
@@ -208,6 +256,7 @@ class IMPORT_OT_skd(Operator, ImportHelper):
         box.label(text="Textures", icon='TEXTURE')
         box.prop(self, "textures_path")
         box.prop(self, "use_shaders")
+        box.prop(self, "auto_import_skc")
         
         # Show current game path from preferences
         prefs = get_addon_preferences()
@@ -284,6 +333,56 @@ class IMPORT_OT_skc(Operator, ImportHelper):
         box.label(text="Transform", icon='ORIENTATION_GLOBAL')
         box.prop(self, "scale")
         box.prop(self, "swap_yz")
+
+
+class IMPORT_OT_skc_standalone(Operator, ImportHelper):
+    """Import SKC Animation as Standalone Skeleton (without SKD model)"""
+    bl_idname = "import_anim.skc_standalone"
+    bl_label = "Import SKC as Skeleton"
+    bl_options = {'REGISTER', 'UNDO'}
+    
+    # File filter
+    filename_ext = ".skc"
+    filter_glob: StringProperty(
+        default="*.skc",
+        options={'HIDDEN'},
+        maxlen=255,
+    )
+    
+    # Import options
+    scale: FloatProperty(
+        name="Scale",
+        description="Global scale factor",
+        default=1.0,
+        min=0.001,
+        max=1000.0,
+    )
+    
+    def execute(self, context):
+        from .importers.import_skc_standalone import import_skc_standalone
+        
+        armature_obj = import_skc_standalone(
+            self.filepath,
+            scale=self.scale,
+        )
+        
+        if armature_obj:
+            self.report({'INFO'}, f"Imported SKC skeleton: {armature_obj.name}")
+            return {'FINISHED'}
+        else:
+            self.report({'ERROR'}, "Failed to import SKC as skeleton")
+            return {'CANCELLED'}
+    
+    def draw(self, context):
+        layout = self.layout
+        
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        
+        box = layout.box()
+        box.label(text="Transform", icon='ORIENTATION_GLOBAL')
+        box.prop(self, "scale")
+
 
 
 # =============================================================================
@@ -451,6 +550,9 @@ def menu_func_import_skd(self, context):
 def menu_func_import_skc(self, context):
     self.layout.operator(IMPORT_OT_skc.bl_idname, text="MoHAA Animation (.skc)")
 
+def menu_func_import_skc_standalone(self, context):
+    self.layout.operator(IMPORT_OT_skc_standalone.bl_idname, text="MoHAA SKC as Skeleton (.skc)")
+
 def menu_func_export_skd(self, context):
     self.layout.operator(EXPORT_OT_skd.bl_idname, text="MoHAA Model (.skd)")
 
@@ -466,6 +568,7 @@ classes = (
     MOHAA_AddonPreferences,
     IMPORT_OT_skd,
     IMPORT_OT_skc,
+    IMPORT_OT_skc_standalone,
     EXPORT_OT_skd,
     EXPORT_OT_skc,
 )
@@ -478,6 +581,7 @@ def register():
     # Add menu items
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import_skd)
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import_skc)
+    bpy.types.TOPBAR_MT_file_import.append(menu_func_import_skc_standalone)
     bpy.types.TOPBAR_MT_file_export.append(menu_func_export_skd)
     bpy.types.TOPBAR_MT_file_export.append(menu_func_export_skc)
 
@@ -486,6 +590,7 @@ def unregister():
     # Remove menu items
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import_skd)
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import_skc)
+    bpy.types.TOPBAR_MT_file_import.remove(menu_func_import_skc_standalone)
     bpy.types.TOPBAR_MT_file_export.remove(menu_func_export_skd)
     bpy.types.TOPBAR_MT_file_export.remove(menu_func_export_skc)
     
