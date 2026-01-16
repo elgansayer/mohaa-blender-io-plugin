@@ -1,0 +1,43 @@
+============================================================
+DEBUGGING: steilhandgranate.skd
+============================================================
+Loading shaders from /home/elgan/.local/share/openmohaa/main/EXISTING-DATA/...
+Loaded 3838 shaders
+
+Surfaces and Texture Resolution:
+
+Surface Material: 'material3'
+  -> NOT in shader map
+  -> FILE NOT FOUND
+  Debug: searching for 'material3' or 'material3' in:
+    Scanning /home/elgan/.local/share/openmohaa/main/EXISTING-DATA/models/projectiles/STEILHANDGRANATE...
+      No matches
+    Scanning /home/elgan/.local/share/openmohaa/main/EXISTING-DATA/textures...
+      No matches
+    Scanning /home/elgan/.local/share/openmohaa/main/EXISTING-DATA/models...
+      No matches
+
+Surface Material: 'material2'
+  -> NOT in shader map
+  -> FILE NOT FOUND
+  Debug: searching for 'material2' or 'material2' in:
+    Scanning /home/elgan/.local/share/openmohaa/main/EXISTING-DATA/models/projectiles/STEILHANDGRANATE...
+      No matches
+    Scanning /home/elgan/.local/share/openmohaa/main/EXISTING-DATA/textures...
+      No matches
+    Scanning /home/elgan/.local/share/openmohaa/main/EXISTING-DATA/models...
+      No matches
+
+Surface Material: 'material1'
+  -> NOT in shader map
+  -> FILE NOT FOUND
+  Debug: searching for 'material1' or 'material1' in:
+    Scanning /home/elgan/.local/share/openmohaa/main/EXISTING-DATA/models/projectiles/STEILHANDGRANATE...
+      No matches
+    Scanning /home/elgan/.local/share/openmohaa/main/EXISTING-DATA/textures...
+      No matches
+    Scanning /home/elgan/.local/share/openmohaa/main/EXISTING-DATA/models...
+      No matches
+Blender 4.3.2
+
+Blender quit
