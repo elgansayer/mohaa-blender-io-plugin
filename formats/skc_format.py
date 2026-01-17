@@ -330,8 +330,19 @@ class SKCAnimation:
             frame_channel_offset = channel_data_start + (frame_idx * header.num_channels * SKC_CHANNEL_DATA_SIZE)
             f.seek(frame_channel_offset)
             
-            for _ in range(header.num_channels):
-                frame_channels.append(SKCChannelFrame.read(f))
+            # Bulk read optimization: Read all channel data for this frame at once
+            bytes_to_read = header.num_channels * SKC_CHANNEL_DATA_SIZE
+            frame_data_block = f.read(bytes_to_read)
+
+            # Use iter_unpack for efficient unpacking
+            # frame_channels = [SKCChannelFrame(data=t) for t in struct.iter_unpack(SKC_CHANNEL_DATA_FORMAT, frame_data_block)]
+
+            # Since we need to construct the list anyway, list comprehension is fast
+            # We use struct.iter_unpack available in Python 3.4+
+            frame_channels = [
+                SKCChannelFrame(data=unpacked_data)
+                for unpacked_data in struct.iter_unpack(SKC_CHANNEL_DATA_FORMAT, frame_data_block)
+            ]
             
             channel_data.append(frame_channels)
         
