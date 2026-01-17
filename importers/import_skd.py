@@ -466,13 +466,20 @@ class SKDImporter:
         mesh_data = bpy.data.meshes.new(name=f"{name}_Mesh")
         
         # Collect all geometry from surfaces
-        all_verts: List[Vector] = []
+        all_verts: List[Tuple[float, float, float]] = []
         all_faces: List[Tuple[int, int, int]] = []
         all_uvs: List[Tuple[float, float]] = []
         all_normals: List[Vector] = []
         all_weights: List[List[Tuple[str, float]]] = []  # Per-vertex bone weights
         face_materials: List[int] = []  # Material index per face
         
+        # Local cache for performance
+        bone_matrices = self.bone_world_matrices
+        bone_positions = self.bone_world_positions
+        scale = self.scale
+        swap_yz = self.swap_yz
+        Vector_cls = Vector
+
         vertex_offset = 0
         
         for surf_idx, surface in enumerate(self.model.surfaces):
@@ -480,30 +487,50 @@ class SKDImporter:
             for vertex in surface.vertices:
                 # Calculate position using bone matrices
                 # Formula: vertex = sum((bone_rotation @ weight_offset + bone_position) * weight)
-                # This is the exact formula from the OpenMOHAA C++ renderer
-                pos = Vector((0.0, 0.0, 0.0))
+                # Optimized to avoid Vector accumulation and intermediate tuples
+
+                pos_x = 0.0
+                pos_y = 0.0
+                pos_z = 0.0
                 
                 for weight in vertex.weights:
                     bone_idx = weight.bone_index
-                    if bone_idx in self.bone_world_matrices:
+                    w = weight.bone_weight
+
+                    if bone_idx in bone_matrices:
                         # Get bone world transform
-                        bone_world_pos, bone_world_rot = self.bone_world_matrices[bone_idx]
+                        bone_world_pos, bone_world_rot = bone_matrices[bone_idx]
                         
                         # Transform: rotate offset by bone matrix, then add bone position
-                        offset = Vector(weight.offset)
-                        rotated_offset = bone_world_rot @ offset
-                        vertex_world = rotated_offset + bone_world_pos
+                        # We still need Vector for matrix multiplication, but we accumulate scalars
+                        v = bone_world_rot @ Vector_cls(weight.offset)
+
+                        pos_x += (v.x + bone_world_pos.x) * w
+                        pos_y += (v.y + bone_world_pos.y) * w
+                        pos_z += (v.z + bone_world_pos.z) * w
                         
-                        pos += vertex_world * weight.bone_weight
-                    elif bone_idx in self.bone_world_positions:
+                    elif bone_idx in bone_positions:
                         # Fallback: just position (no rotation)
-                        bone_world = self.bone_world_positions[bone_idx]
-                        pos += (Vector(bone_world) + Vector(weight.offset)) * weight.bone_weight
+                        bone_pos_tuple = bone_positions[bone_idx]
+                        off_x, off_y, off_z = weight.offset
+
+                        pos_x += (bone_pos_tuple[0] + off_x) * w
+                        pos_y += (bone_pos_tuple[1] + off_y) * w
+                        pos_z += (bone_pos_tuple[2] + off_z) * w
                     else:
                         # Last fallback: just use weight offset
-                        pos += Vector(weight.offset) * weight.bone_weight
+                        off_x, off_y, off_z = weight.offset
+                        pos_x += off_x * w
+                        pos_y += off_y * w
+                        pos_z += off_z * w
+
+                # Inline transform (matches _transform_position logic)
+                # MoHAA: Y-forward, Z-up -> Blender: Y-back, Z-up
+                if swap_yz:
+                    all_verts.append((pos_x * scale, -pos_z * scale, pos_y * scale))
+                else:
+                    all_verts.append((pos_x * scale, pos_y * scale, pos_z * scale))
                 
-                all_verts.append(self._transform_position(tuple(pos)))
                 all_normals.append(self._transform_normal(vertex.normal))
                 all_uvs.append(self._transform_uv(vertex.tex_coords))
                 
@@ -529,7 +556,7 @@ class SKDImporter:
             vertex_offset += len(surface.vertices)
         
         # Create mesh geometry
-        mesh_data.from_pydata([v.to_tuple() for v in all_verts], [], all_faces)
+        mesh_data.from_pydata(all_verts, [], all_faces)
         mesh_data.update()
         
         # Create UV layer
