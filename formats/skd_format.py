@@ -410,6 +410,52 @@ class SKDVertex:
             morphs=morphs
         )
     
+    @classmethod
+    def read_bulk(cls, data: bytes, offset: int, num_verts: int) -> Tuple[List['SKDVertex'], int]:
+        """Bulk read vertices from bytes buffer"""
+        vertices = []
+        initial_offset = offset
+
+        # Pre-compile struct formats for performance
+        vertex_struct = struct.Struct(SKD_VERTEX_FORMAT)
+        morph_struct = struct.Struct(SKD_MORPH_FORMAT)
+        weight_struct = struct.Struct(SKD_WEIGHT_FORMAT)
+
+        vertex_size = SKD_VERTEX_SIZE
+        morph_size = SKD_MORPH_SIZE
+        weight_size = SKD_WEIGHT_SIZE
+
+        for _ in range(num_verts):
+            # Unpack vertex header
+            v_data = vertex_struct.unpack_from(data, offset)
+            offset += vertex_size
+
+            normal = (v_data[0], v_data[1], v_data[2])
+            tex_coords = (v_data[3], v_data[4])
+            num_weights = v_data[5]
+            num_morphs = v_data[6]
+
+            morphs = []
+            for _ in range(num_morphs):
+                 m_data = morph_struct.unpack_from(data, offset)
+                 offset += morph_size
+                 morphs.append(SKDMorph(m_data[0], (m_data[1], m_data[2], m_data[3])))
+
+            weights = []
+            for _ in range(num_weights):
+                 w_data = weight_struct.unpack_from(data, offset)
+                 offset += weight_size
+                 weights.append(SKDWeight(w_data[0], w_data[1], (w_data[2], w_data[3], w_data[4])))
+
+            vertices.append(cls(
+                normal=normal,
+                tex_coords=tex_coords,
+                weights=weights,
+                morphs=morphs
+            ))
+
+        return vertices, offset - initial_offset
+
     def write(self, f: BytesIO) -> None:
         """Write vertex to file"""
         data = struct.pack(
@@ -593,10 +639,15 @@ class SKDModel:
                 triangles.append(SKDTriangle.read(f))
             
             # Read vertices
-            f.seek(surface_start + surface_header.ofs_verts)
-            vertices = []
-            for _ in range(surface_header.num_verts):
-                vertices.append(SKDVertex.read(f))
+            # Optimized bulk read using the original data buffer
+            vertices, bytes_read = SKDVertex.read_bulk(
+                data,
+                surface_start + surface_header.ofs_verts,
+                surface_header.num_verts
+            )
+
+            # Update file pointer to keep it consistent
+            f.seek(surface_start + surface_header.ofs_verts + bytes_read)
             
             surfaces.append(SKDSurfaceData(
                 header=surface_header,
