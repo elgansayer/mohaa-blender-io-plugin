@@ -10,7 +10,7 @@ SKC files use 'SKAN' identifier with version 13 (old) or 14 (current).
 
 import struct
 from dataclasses import dataclass, field
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Union
 from io import BytesIO
 
 # =============================================================================
@@ -308,33 +308,84 @@ class SKCAnimation:
             return cls(header=header, frames=[], channels=[], channel_data=[])
         
         # Read frame headers
+        # Optimize: Read all frames at once
         frames = []
-        for _ in range(header.num_frames):
-            frames.append(SKCFrame.read(f))
+        if header.num_frames > 0:
+            frame_data_size = SKC_FRAME_SIZE * header.num_frames
+            frame_bytes = f.read(frame_data_size)
+
+            # Using iter_unpack is faster than loop
+            for unpacked in struct.iter_unpack(SKC_FRAME_FORMAT, frame_bytes):
+                frames.append(SKCFrame(
+                    bounds_min=(unpacked[0], unpacked[1], unpacked[2]),
+                    bounds_max=(unpacked[3], unpacked[4], unpacked[5]),
+                    radius=unpacked[6],
+                    delta=(unpacked[7], unpacked[8], unpacked[9]),
+                    angle_delta=unpacked[10],
+                    ofs_channels=unpacked[11]
+                ))
         
         # Read channel names
         channels = []
         if header.ofs_channel_names > 0:
             f.seek(header.ofs_channel_names)
-            for _ in range(header.num_channels):
-                name_data = f.read(SKC_CHANNEL_NAME_SIZE)
+
+            # Optimize: Read all channel names at once
+            names_data_size = SKC_CHANNEL_NAME_SIZE * header.num_channels
+            names_bytes = f.read(names_data_size)
+
+            for i in range(header.num_channels):
+                start = i * SKC_CHANNEL_NAME_SIZE
+                name_data = names_bytes[start : start + SKC_CHANNEL_NAME_SIZE]
                 name = name_data.rstrip(b'\x00').decode('latin-1')
                 channels.append(SKCChannel.from_name(name))
         
         # Read channel data for each frame
         channel_data_start = header_size + (header.num_frames * SKC_FRAME_SIZE)
         
+        # Optimize: Read channel data in bulk
+        # Channel data is contiguous for all frames if there are no gaps
+        # Format is: [Frame 0 Channels][Frame 1 Channels]...
+        # Each frame has num_channels * 16 bytes
+
+        total_channels_per_frame = header.num_channels
+        bytes_per_frame = total_channels_per_frame * SKC_CHANNEL_DATA_SIZE
+        total_data_size = header.num_frames * bytes_per_frame
+
+        f.seek(channel_data_start)
+        all_channel_bytes = f.read(total_data_size)
+
         channel_data = []
-        for frame_idx, frame in enumerate(frames):
-            frame_channels = []
-            frame_channel_offset = channel_data_start + (frame_idx * header.num_channels * SKC_CHANNEL_DATA_SIZE)
-            f.seek(frame_channel_offset)
-            
-            for _ in range(header.num_channels):
-                frame_channels.append(SKCChannelFrame.read(f))
-            
-            channel_data.append(frame_channels)
         
+        # Pre-calculate format for unpacking one frame's worth of channels
+        # This is faster than loop but struct.unpack needs a fixed format string
+        # If num_channels is too large, format string might be too long? Python struct handles limits ok usually.
+        # But constructing format string for 100 channels * 4 floats = 400 floats is fine.
+
+        # However, we need to return SKCChannelFrame objects or equivalent structure.
+        # Constructing SKCChannelFrame objects is slow.
+        # We will modify SKCChannelFrame to be lighter or store raw tuples.
+        # For now, let's stick to the interface but optimize reading.
+
+        # Since we cannot change the public interface easily without breaking code,
+        # we will keep channel_data as List[List[SKCChannelFrame]].
+        # But we will initialize SKCChannelFrame faster.
+
+        # Using iter_unpack on the whole buffer is likely fastest.
+        # It yields tuples of 4 floats.
+
+        all_channels_flat = list(struct.iter_unpack(SKC_CHANNEL_DATA_FORMAT, all_channel_bytes))
+
+        # Now redistribute into frames
+        # Slicing the list is fast
+        for i in range(header.num_frames):
+            start_idx = i * total_channels_per_frame
+            frame_tuples = all_channels_flat[start_idx : start_idx + total_channels_per_frame]
+            # Create SKCChannelFrame objects
+            # This list comprehension is still the bottleneck but much faster than individual file reads
+            frame_channels = [SKCChannelFrame(data=t) for t in frame_tuples]
+            channel_data.append(frame_channels)
+
         return cls(
             header=header,
             frames=frames,

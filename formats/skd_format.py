@@ -588,13 +588,23 @@ class SKDModel:
             
             # Read triangles
             f.seek(surface_start + surface_header.ofs_triangles)
+
+            # Optimize: Read all triangles at once
+            num_triangles = surface_header.num_triangles
             triangles = []
-            for _ in range(surface_header.num_triangles):
-                triangles.append(SKDTriangle.read(f))
+            if num_triangles > 0:
+                tri_data_size = num_triangles * SKD_TRIANGLE_SIZE
+                tri_bytes = f.read(tri_data_size)
+
+                # iter_unpack yields tuples of (i1, i2, i3)
+                for t in struct.iter_unpack(SKD_TRIANGLE_FORMAT, tri_bytes):
+                    triangles.append(SKDTriangle(indices=t))
             
             # Read vertices
             f.seek(surface_start + surface_header.ofs_verts)
             vertices = []
+
+            # Vertices are variable size, so we can't easily use iter_unpack for the whole thing
             for _ in range(surface_header.num_verts):
                 vertices.append(SKDVertex.read(f))
             
