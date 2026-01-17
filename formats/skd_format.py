@@ -409,6 +409,64 @@ class SKDVertex:
             weights=weights,
             morphs=morphs
         )
+
+    @classmethod
+    def read_vertices(cls, f: BytesIO, num_verts: int) -> List['SKDVertex']:
+        """Read multiple vertices efficiently"""
+        vertices = []
+        try:
+            buf = f.getbuffer()
+        except AttributeError:
+            # Fallback for non-BytesIO
+            for _ in range(num_verts):
+                vertices.append(cls.read(f))
+            return vertices
+
+        offset = f.tell()
+
+        # Pre-bind struct methods for loop efficiency
+        unpack_vertex = struct.Struct(SKD_VERTEX_FORMAT).unpack_from
+        unpack_morph = struct.Struct(SKD_MORPH_FORMAT).unpack_from
+        unpack_weight = struct.Struct(SKD_WEIGHT_FORMAT).unpack_from
+
+        for _ in range(num_verts):
+            # Read vertex header
+            unpacked = unpack_vertex(buf, offset)
+            offset += SKD_VERTEX_SIZE
+
+            normal = (unpacked[0], unpacked[1], unpacked[2])
+            tex_coords = (unpacked[3], unpacked[4])
+            num_weights = unpacked[5]
+            num_morphs = unpacked[6]
+
+            morphs = []
+            for _ in range(num_morphs):
+                m_unpacked = unpack_morph(buf, offset)
+                offset += SKD_MORPH_SIZE
+                morphs.append(SKDMorph(
+                    morph_index=m_unpacked[0],
+                    offset=(m_unpacked[1], m_unpacked[2], m_unpacked[3])
+                ))
+
+            weights = []
+            for _ in range(num_weights):
+                w_unpacked = unpack_weight(buf, offset)
+                offset += SKD_WEIGHT_SIZE
+                weights.append(SKDWeight(
+                    bone_index=w_unpacked[0],
+                    bone_weight=w_unpacked[1],
+                    offset=(w_unpacked[2], w_unpacked[3], w_unpacked[4])
+                ))
+
+            vertices.append(cls(
+                normal=normal,
+                tex_coords=tex_coords,
+                weights=weights,
+                morphs=morphs
+            ))
+
+        f.seek(offset)
+        return vertices
     
     def write(self, f: BytesIO) -> None:
         """Write vertex to file"""
@@ -594,9 +652,7 @@ class SKDModel:
             
             # Read vertices
             f.seek(surface_start + surface_header.ofs_verts)
-            vertices = []
-            for _ in range(surface_header.num_verts):
-                vertices.append(SKDVertex.read(f))
+            vertices = SKDVertex.read_vertices(f, surface_header.num_verts)
             
             surfaces.append(SKDSurfaceData(
                 header=surface_header,
