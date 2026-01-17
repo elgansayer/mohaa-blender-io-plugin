@@ -205,11 +205,21 @@ class SKCImporter:
                 bone_channels[bone_name]['pos'] = i
 
         # Process Keyframes
+        # Pre-allocate frames list for foreach_set
+        frame_indices = range(self.animation.header.num_frames)
+        num_frames = len(frame_indices)
+
+        # Flattened frame time data [f0, f1, ...] isn't needed for foreach_set 'co',
+        # we need [f0, val0, f1, val1, ...] which we will construct.
+
         for bone_name, data in bone_channels.items():
             if bone_name not in pose_bones:
                 continue
             
             pose_bone = pose_bones[bone_name]
+            # Ensure we are using QUATERNION mode for rotation
+            pose_bone.rotation_mode = 'QUATERNION'
+
             rest_local = rest_local_matrices.get(bone_name, Matrix.Identity(4))
             rest_local_inv = rest_local.inverted()
             
@@ -219,7 +229,22 @@ class SKCImporter:
             if rot_idx is None and pos_idx is None:
                 continue
 
-            for frame_idx in range(self.animation.header.num_frames):
+            # Prepare data lists
+            # We will collect [f, x, f, y, f, z] for locations
+            # and [f, w, f, x, f, y, f, z] for rotations.
+            # Wait, F-Curves are per index.
+            # Location[0] needs [f0, x0, f1, x1, ...]
+
+            loc_x_list = [0.0] * (num_frames * 2)
+            loc_y_list = [0.0] * (num_frames * 2)
+            loc_z_list = [0.0] * (num_frames * 2)
+
+            rot_w_list = [0.0] * (num_frames * 2)
+            rot_x_list = [0.0] * (num_frames * 2)
+            rot_y_list = [0.0] * (num_frames * 2)
+            rot_z_list = [0.0] * (num_frames * 2)
+
+            for frame_idx in frame_indices:
                 target_pos = rest_local.to_translation()
                 target_quat = rest_local.to_quaternion()
                 
@@ -236,11 +261,58 @@ class SKCImporter:
                 
                 delta_matrix = rest_local_inv @ target_matrix
                 
-                pose_bone.location = delta_matrix.to_translation()
-                pose_bone.rotation_quaternion = delta_matrix.to_quaternion()
+                loc = delta_matrix.to_translation()
+                rot = delta_matrix.to_quaternion()
+
+                # Fill lists
+                # idx * 2 is frame, idx * 2 + 1 is value
+                idx_base = frame_idx * 2
+
+                loc_x_list[idx_base] = float(frame_idx)
+                loc_x_list[idx_base+1] = loc.x
+
+                loc_y_list[idx_base] = float(frame_idx)
+                loc_y_list[idx_base+1] = loc.y
                 
-                pose_bone.keyframe_insert(data_path="location", frame=frame_idx)
-                pose_bone.keyframe_insert(data_path="rotation_quaternion", frame=frame_idx)
+                loc_z_list[idx_base] = float(frame_idx)
+                loc_z_list[idx_base+1] = loc.z
+
+                rot_w_list[idx_base] = float(frame_idx)
+                rot_w_list[idx_base+1] = rot.w
+
+                rot_x_list[idx_base] = float(frame_idx)
+                rot_x_list[idx_base+1] = rot.x
+
+                rot_y_list[idx_base] = float(frame_idx)
+                rot_y_list[idx_base+1] = rot.y
+
+                rot_z_list[idx_base] = float(frame_idx)
+                rot_z_list[idx_base+1] = rot.z
+
+            # Create F-Curves and assign data
+            data_path_loc = pose_bone.path_from_id("location")
+            data_path_rot = pose_bone.path_from_id("rotation_quaternion")
+
+            # Helper to create/get fcurve and set data
+            def set_fcurve_data(act, data_path, index, values):
+                fcurve = act.fcurves.find(data_path, index=index)
+                if not fcurve:
+                    fcurve = act.fcurves.new(data_path, index=index, action_group=bone_name)
+                else:
+                    fcurve.keyframe_points.clear()
+
+                fcurve.keyframe_points.add(num_frames)
+                fcurve.keyframe_points.foreach_set('co', values)
+                fcurve.update() # Ensure curve is updated
+
+            set_fcurve_data(action, data_path_loc, 0, loc_x_list)
+            set_fcurve_data(action, data_path_loc, 1, loc_y_list)
+            set_fcurve_data(action, data_path_loc, 2, loc_z_list)
+
+            set_fcurve_data(action, data_path_rot, 0, rot_w_list)
+            set_fcurve_data(action, data_path_rot, 1, rot_x_list)
+            set_fcurve_data(action, data_path_rot, 2, rot_y_list)
+            set_fcurve_data(action, data_path_rot, 3, rot_z_list)
         
         for bone_name in bone_channels:
             if bone_name in pose_bones:
