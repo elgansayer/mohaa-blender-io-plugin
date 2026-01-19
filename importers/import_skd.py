@@ -480,6 +480,10 @@ class SKDImporter:
         swap_yz = self.swap_yz
         Vector_cls = Vector
 
+        # Optimization: Pre-calculate bone world matrices as pure float tuples or faster structures?
+        # Matrices are mathutils.Matrix (3x3). Matrix mult is fast in C.
+        # But Vector creation `Vector(weight.offset)` is slow in Python loop.
+
         vertex_offset = 0
         
         for surf_idx, surface in enumerate(self.model.surfaces):
@@ -487,42 +491,59 @@ class SKDImporter:
             for vertex in surface.vertices:
                 # Calculate position using bone matrices
                 # Formula: vertex = sum((bone_rotation @ weight_offset + bone_position) * weight)
-                # Optimized to avoid Vector accumulation and intermediate tuples
 
                 pos_x = 0.0
                 pos_y = 0.0
                 pos_z = 0.0
                 
-                for weight in vertex.weights:
-                    bone_idx = weight.bone_index
-                    w = weight.bone_weight
-
-                    if bone_idx in bone_matrices:
-                        # Get bone world transform
-                        bone_world_pos, bone_world_rot = bone_matrices[bone_idx]
+                # Check if we have weights first (should always be true for valid SKD)
+                if vertex.weights:
+                    for weight in vertex.weights:
+                        bone_idx = weight.bone_index
+                        w = weight.bone_weight
                         
-                        # Transform: rotate offset by bone matrix, then add bone position
-                        # We still need Vector for matrix multiplication, but we accumulate scalars
-                        v = bone_world_rot @ Vector_cls(weight.offset)
+                        # Inline checking
+                        matrix_data = bone_matrices.get(bone_idx)
+                        if matrix_data:
+                            bone_world_pos, bone_world_rot = matrix_data
 
-                        pos_x += (v.x + bone_world_pos.x) * w
-                        pos_y += (v.y + bone_world_pos.y) * w
-                        pos_z += (v.z + bone_world_pos.z) * w
-                        
-                    elif bone_idx in bone_positions:
-                        # Fallback: just position (no rotation)
-                        bone_pos_tuple = bone_positions[bone_idx]
-                        off_x, off_y, off_z = weight.offset
+                            # Optimized: Manually unpack offset to avoid Vector() if possible?
+                            # bone_world_rot is Matrix 3x3.
+                            # v = M @ v_local
+                            # We can do this manually to avoid Vector overhead?
+                            # v.x = m00*x + m01*y + m02*z
+                            # v.y = m10*x + m11*y + m12*z
+                            # v.z = m20*x + m21*y + m22*z
 
-                        pos_x += (bone_pos_tuple[0] + off_x) * w
-                        pos_y += (bone_pos_tuple[1] + off_y) * w
-                        pos_z += (bone_pos_tuple[2] + off_z) * w
-                    else:
-                        # Last fallback: just use weight offset
-                        off_x, off_y, off_z = weight.offset
-                        pos_x += off_x * w
-                        pos_y += off_y * w
-                        pos_z += off_z * w
+                            wx, wy, wz = weight.offset
+
+                            # Accessing matrix elements is slow in Python.
+                            # But Vector() creation is also slow.
+                            # Benchmarks suggest Vector() + @ is reasonably optimized in C extension,
+                            # but loop overhead kills.
+                            # Let's trust the C-API but avoid excessive wrapping.
+
+                            v = bone_world_rot @ Vector_cls((wx, wy, wz))
+
+                            pos_x += (v.x + bone_world_pos.x) * w
+                            pos_y += (v.y + bone_world_pos.y) * w
+                            pos_z += (v.z + bone_world_pos.z) * w
+
+                        elif bone_idx in bone_positions:
+                            bone_pos_tuple = bone_positions[bone_idx]
+                            off_x, off_y, off_z = weight.offset
+
+                            pos_x += (bone_pos_tuple[0] + off_x) * w
+                            pos_y += (bone_pos_tuple[1] + off_y) * w
+                            pos_z += (bone_pos_tuple[2] + off_z) * w
+                        else:
+                            off_x, off_y, off_z = weight.offset
+                            pos_x += off_x * w
+                            pos_y += off_y * w
+                            pos_z += off_z * w
+                else:
+                    # Should not happen but safe default
+                    pass
 
                 # Inline transform (matches _transform_position logic)
                 # MoHAA: Y-forward, Z-up -> Blender: Y-back, Z-up
