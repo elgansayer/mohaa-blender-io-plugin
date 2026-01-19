@@ -244,17 +244,40 @@ class SKCImporter:
             rot_y_list = [0.0] * (num_frames * 2)
             rot_z_list = [0.0] * (num_frames * 2)
 
+            # Pre-calculate base transforms
+            rest_pos = rest_local.to_translation()
+            rest_quat = rest_local.to_quaternion()
+
+            # Pre-fetch channel data column to avoid repeated lookups
+            pos_channel_data = None
+            if pos_idx is not None:
+                # Accessing the inner list of channels for all frames
+                # channel_data is [frame][channel_index]
+                # We want [frame][pos_idx] for all frames
+                pos_channel_data = [frame[pos_idx].data for frame in self.animation.channel_data]
+
+            rot_channel_data = None
+            if rot_idx is not None:
+                rot_channel_data = [frame[rot_idx].data for frame in self.animation.channel_data]
+
+            # Pre-bind transform methods
+            transform_pos = self._transform_pos
+            transform_quat = self._transform_quat
+
+            # Loop
             for frame_idx in frame_indices:
-                target_pos = rest_local.to_translation()
-                target_quat = rest_local.to_quaternion()
+                target_pos = rest_pos
+                target_quat = rest_quat
                 
-                if pos_idx is not None:
-                    raw_pos = self.animation.channel_data[frame_idx][pos_idx].as_position
-                    target_pos = self._transform_pos(raw_pos)
+                if pos_channel_data:
+                    # Raw tuple (x,y,z,w) - position uses first 3
+                    raw_data = pos_channel_data[frame_idx]
+                    target_pos = transform_pos((raw_data[0], raw_data[1], raw_data[2]))
                     
-                if rot_idx is not None:
-                    raw_quat = self.animation.channel_data[frame_idx][rot_idx].as_quaternion
-                    target_quat = self._transform_quat(raw_quat)
+                if rot_channel_data:
+                    # Raw tuple (x,y,z,w) - quat uses first 4
+                    raw_data = rot_channel_data[frame_idx]
+                    target_quat = transform_quat((raw_data[0], raw_data[1], raw_data[2], raw_data[3]))
                     
                 target_matrix = target_quat.to_matrix().to_4x4()
                 target_matrix.translation = target_pos
@@ -265,7 +288,6 @@ class SKCImporter:
                 rot = delta_matrix.to_quaternion()
 
                 # Fill lists
-                # idx * 2 is frame, idx * 2 + 1 is value
                 idx_base = frame_idx * 2
 
                 loc_x_list[idx_base] = float(frame_idx)
