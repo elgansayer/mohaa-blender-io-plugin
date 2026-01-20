@@ -177,7 +177,7 @@ SKD_TRIANGLE_SIZE = 12
 # Data Classes
 # =============================================================================
 
-@dataclass
+@dataclass(slots=True)
 class SKDHeader:
     """SKD file header"""
     ident: int
@@ -267,13 +267,12 @@ class SKDHeader:
                 self.num_surfaces, self.num_bones,
                 self.ofs_bones, self.ofs_surfaces, self.ofs_end,
                 *self.lod_index,
-                self.num_boxes, self.ofs_boxes,
-                self.num_morph_targets, self.ofs_morph_targets
+                self.num_boxes, self.ofs_boxes
             )
         f.write(data)
 
 
-@dataclass
+@dataclass(slots=True)
 class SKDSurface:
     """SKD surface (mesh group)"""
     ident: int
@@ -320,7 +319,7 @@ class SKDSurface:
         f.write(data)
 
 
-@dataclass
+@dataclass(slots=True)
 class SKDWeight:
     """Bone weight for a vertex"""
     bone_index: int
@@ -348,7 +347,7 @@ class SKDWeight:
         f.write(data)
 
 
-@dataclass
+@dataclass(slots=True)
 class SKDMorph:
     """Morph target offset for a vertex"""
     morph_index: int
@@ -374,7 +373,7 @@ class SKDMorph:
         f.write(data)
 
 
-@dataclass
+@dataclass(slots=True)
 class SKDVertex:
     """SKD vertex with weights and morphs"""
     normal: Tuple[float, float, float]
@@ -502,7 +501,7 @@ class SKDVertex:
         return tuple(pos)
 
 
-@dataclass
+@dataclass(slots=True)
 class SKDBoneFileData:
     """Bone data from file (boneFileData_t)"""
     name: str
@@ -568,7 +567,7 @@ class SKDBoneFileData:
         return bone
 
 
-@dataclass 
+@dataclass(slots=True)
 class SKDBoneName:
     """Simple bone name structure (for older SKB format)"""
     parent: int
@@ -589,7 +588,7 @@ class SKDBoneName:
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class SKDTriangle:
     """Triangle face indices"""
     indices: Tuple[int, int, int]
@@ -607,7 +606,7 @@ class SKDTriangle:
         f.write(data)
 
 
-@dataclass
+@dataclass(slots=True)
 class SKDModel:
     """Complete SKD model data"""
     header: SKDHeader
@@ -722,7 +721,7 @@ class SKDModel:
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class SKDSurfaceData:
     """Complete surface data including geometry"""
     header: SKDSurface
