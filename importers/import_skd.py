@@ -232,6 +232,14 @@ class SKDImporter:
             
             return pos, rot
         
+        # Build children map for O(N) traversal
+        children_map = {}
+        for idx, bone in enumerate(self.model.bones):
+            if bone.parent:
+                if bone.parent not in children_map:
+                    children_map[bone.parent] = []
+                children_map[bone.parent].append(idx)
+
         def calc_world(bone_idx, parent_pos, parent_rot):
             """Calculate world transform for a bone and its children"""
             bone = self.model.bones[bone_idx]
@@ -246,9 +254,9 @@ class SKDImporter:
             # Also store position tuple for backward compatibility
             self.bone_world_positions[bone_idx] = tuple(world_pos)
             
-            # Find children and recurse
-            for child_idx, child_bone in enumerate(self.model.bones):
-                if child_bone.parent == bone.name:
+            # Find children and recurse using map
+            if bone.name in children_map:
+                for child_idx in children_map[bone.name]:
                     calc_world(child_idx, world_pos, world_rot)
         
         # Start from roots
@@ -478,7 +486,17 @@ class SKDImporter:
         bone_positions = self.bone_world_positions
         scale = self.scale
         swap_yz = self.swap_yz
-        Vector_cls = Vector
+
+        # Pre-cache bone matrices as tuples to avoid object creation in inner loop
+        # Format: bone_idx -> (pos_x, pos_y, pos_z, m00, m01, m02, m10, m11, m12, m20, m21, m22)
+        bone_fast_cache = {}
+        for bone_idx, (pos, rot) in bone_matrices.items():
+            bone_fast_cache[bone_idx] = (
+                pos.x, pos.y, pos.z,
+                rot[0][0], rot[0][1], rot[0][2],
+                rot[1][0], rot[1][1], rot[1][2],
+                rot[2][0], rot[2][1], rot[2][2]
+            )
 
         vertex_offset = 0
         
@@ -497,17 +515,23 @@ class SKDImporter:
                     bone_idx = weight.bone_index
                     w = weight.bone_weight
 
-                    if bone_idx in bone_matrices:
-                        # Get bone world transform
-                        bone_world_pos, bone_world_rot = bone_matrices[bone_idx]
-                        
-                        # Transform: rotate offset by bone matrix, then add bone position
-                        # We still need Vector for matrix multiplication, but we accumulate scalars
-                        v = bone_world_rot @ Vector_cls(weight.offset)
+                    if bone_idx in bone_fast_cache:
+                        # Use fast cached unpacked values
+                        (bx, by, bz,
+                         m00, m01, m02,
+                         m10, m11, m12,
+                         m20, m21, m22) = bone_fast_cache[bone_idx]
 
-                        pos_x += (v.x + bone_world_pos.x) * w
-                        pos_y += (v.y + bone_world_pos.y) * w
-                        pos_z += (v.z + bone_world_pos.z) * w
+                        ox, oy, oz = weight.offset
+                        
+                        # Matrix * Vector (inline)
+                        vx = m00*ox + m01*oy + m02*oz
+                        vy = m10*ox + m11*oy + m12*oz
+                        vz = m20*ox + m21*oy + m22*oz
+
+                        pos_x += (vx + bx) * w
+                        pos_y += (vy + by) * w
+                        pos_z += (vz + bz) * w
                         
                     elif bone_idx in bone_positions:
                         # Fallback: just position (no rotation)

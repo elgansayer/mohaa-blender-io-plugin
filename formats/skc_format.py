@@ -105,7 +105,7 @@ SKC_CHANNEL_NAME_FORMAT = '<32s'
 # Data Classes
 # =============================================================================
 
-@dataclass
+@dataclass(slots=True)
 class SKCHeader:
     """SKC animation file header"""
     ident: int
@@ -170,7 +170,7 @@ class SKCHeader:
         return bool(self.flags & TAF_HASUPPER)
 
 
-@dataclass
+@dataclass(slots=True)
 class SKCFrame:
     """Animation frame data"""
     bounds_min: Tuple[float, float, float]
@@ -208,7 +208,7 @@ class SKCFrame:
         f.write(data)
 
 
-@dataclass
+@dataclass(slots=True)
 class SKCChannel:
     """Animation channel (bone transform component)"""
     name: str
@@ -221,7 +221,7 @@ class SKCChannel:
         return cls(name=name, channel_type=channel_type)
 
 
-@dataclass
+@dataclass(slots=True)
 class SKCChannelFrame:
     """Channel data for a single frame"""
     data: Tuple[float, ...]  # 4 floats for rotation, 3 for position, 1 for value
@@ -256,7 +256,7 @@ class SKCChannelFrame:
         return self.data[0]
 
 
-@dataclass
+@dataclass(slots=True)
 class SKCAnimation:
     """Complete SKC animation data"""
     header: SKCHeader
@@ -287,18 +287,18 @@ class SKCAnimation:
         
         # Check version and determine header format
         if version in (10, 11, 12):
-            # Old format: has 64-byte filename after version
+            # Old format (MoHAA expansions): has 64-byte filename after version
             # Format: [ident:4][version:4][filename:64][...rest of header]
             header = cls._read_old_header(f, ident, version)
             header_size = 8 + 64 + 40  # ident+ver + filename + rest of old header
         elif version in (13, 14):
-            # New format: standard header
+            # Standard format (MoHAA original): standard header
             f.seek(0)
             header = SKCHeader.read(f)
             header_size = SKC_HEADER_SIZE
         else:
-            # Unknown version - try old format first, then new
-            print(f"Warning: Unknown SKC version {version}, attempting to parse")
+            # Unknown version - assume standard format but warn
+            print(f"Warning: Unknown SKC version {version}. Assuming standard format (compatible with v13/14).")
             f.seek(0)
             header = SKCHeader.read(f)
             header_size = SKC_HEADER_SIZE
