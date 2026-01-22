@@ -221,10 +221,10 @@ class SKCChannel:
         return cls(name=name, channel_type=channel_type)
 
 
-@dataclass
+@dataclass(slots=True)
 class SKCChannelFrame:
     """Channel data for a single frame"""
-    data: Tuple[float, ...]  # 4 floats for rotation, 3 for position, 1 for value
+    data: Tuple[float, float, float, float]  # 4 floats for rotation, 3 for position, 1 for value
     
     @classmethod
     def read(cls, f: BytesIO) -> 'SKCChannelFrame':
@@ -236,19 +236,19 @@ class SKCChannelFrame:
     def write(self, f: BytesIO) -> None:
         """Write channel frame data"""
         # Pad with zeros if less than 4 values
-        data_padded = tuple(self.data) + (0.0,) * (4 - len(self.data))
+        data_padded = self.data + (0.0,) * (4 - len(self.data))
         struct_data = struct.pack(SKC_CHANNEL_DATA_FORMAT, *data_padded[:4])
         f.write(struct_data)
     
     @property
     def as_quaternion(self) -> Tuple[float, float, float, float]:
         """Get as quaternion (x, y, z, w)"""
-        return self.data[:4]
+        return self.data
     
     @property
     def as_position(self) -> Tuple[float, float, float]:
         """Get as position (x, y, z)"""
-        return self.data[:3]
+        return (self.data[0], self.data[1], self.data[2])
     
     @property
     def as_value(self) -> float:
@@ -324,27 +324,33 @@ class SKCAnimation:
         # Read channel data for each frame
         channel_data_start = header_size + (header.num_frames * SKC_FRAME_SIZE)
         
+        # Optimize: Read ALL channel data at once
+        total_channels_size = header.num_frames * header.num_channels * SKC_CHANNEL_DATA_SIZE
+        f.seek(channel_data_start)
+        all_channel_bytes = f.read(total_channels_size)
+
+        # Unpack all floats at once (each channel is 4 floats)
+        # Note: SKC_CHANNEL_DATA_FORMAT is '<4f'
+        # We can iterate over the entire buffer efficiently
+
         channel_data = []
-        for frame_idx, frame in enumerate(frames):
-            frame_channels = []
-            frame_channel_offset = channel_data_start + (frame_idx * header.num_channels * SKC_CHANNEL_DATA_SIZE)
-            f.seek(frame_channel_offset)
-            
-            # Bulk read optimization: Read all channel data for this frame at once
-            bytes_to_read = header.num_channels * SKC_CHANNEL_DATA_SIZE
-            frame_data_block = f.read(bytes_to_read)
 
-            # Use iter_unpack for efficient unpacking
-            # frame_channels = [SKCChannelFrame(data=t) for t in struct.iter_unpack(SKC_CHANNEL_DATA_FORMAT, frame_data_block)]
+        # Pre-calculate iterators for slicing
+        # Using struct.iter_unpack is very efficient in Python 3.4+
+        # It returns an iterator of tuples
+        all_channel_tuples = struct.iter_unpack(SKC_CHANNEL_DATA_FORMAT, all_channel_bytes)
 
-            # Since we need to construct the list anyway, list comprehension is fast
-            # We use struct.iter_unpack available in Python 3.4+
-            frame_channels = [
-                SKCChannelFrame(data=unpacked_data)
-                for unpacked_data in struct.iter_unpack(SKC_CHANNEL_DATA_FORMAT, frame_data_block)
-            ]
+        # We need to structure this as [frame][channel]
+        # Since the data is stored linearly: Frame0[Ch0, Ch1...], Frame1[Ch0, Ch1...]
+        # We can just chunk the iterator
+
+        current_frame_channels = []
+        for channel_tuple in all_channel_tuples:
+            current_frame_channels.append(SKCChannelFrame(data=channel_tuple))
             
-            channel_data.append(frame_channels)
+            if len(current_frame_channels) == header.num_channels:
+                channel_data.append(current_frame_channels)
+                current_frame_channels = []
         
         return cls(
             header=header,
