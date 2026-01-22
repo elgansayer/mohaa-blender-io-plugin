@@ -18,7 +18,7 @@ import os
 from io import BytesIO
 
 from ..formats.skc_format import (
-    SKC_IDENT_INT, SKC_VERSION_CURRENT,
+    SKC_IDENT_INT, SKC_VERSION_CURRENT, SKC_VERSION_OLD,
     CHANNEL_ROTATION, CHANNEL_POSITION,
     SKC_HEADER_SIZE, SKC_FRAME_SIZE, SKC_CHANNEL_DATA_SIZE, SKC_CHANNEL_NAME_SIZE
 )
@@ -31,7 +31,8 @@ class SKCExporter:
                  armature_obj: bpy.types.Object,
                  action: Optional[bpy.types.Action] = None,
                  swap_yz: bool = False,
-                 scale: float = 1.0):
+                 scale: float = 1.0,
+                 version: int = SKC_VERSION_CURRENT):
         """
         Initialize exporter.
         
@@ -41,12 +42,14 @@ class SKCExporter:
             action: Specific action to export (or use active)
             swap_yz: Swap Y and Z axes
             scale: Global scale factor
+            version: SKC version (13 or 14)
         """
         self.filepath = filepath
         self.armature_obj = armature_obj
         self.action = action
         self.swap_yz = swap_yz
         self.scale = scale
+        self.version = version
     
     def execute(self) -> bool:
         """
@@ -227,7 +230,7 @@ class SKCExporter:
         header = struct.pack(
             '<i i i i f 3f f i i i',
             SKC_IDENT_INT,  # ident ('SKAN')
-            SKC_VERSION_CURRENT,  # version (14)
+            self.version,  # version
             0,  # flags
             total_size,  # nBytesUsed
             frame_time,  # frameTime
@@ -288,7 +291,7 @@ class SKCExporter:
         
         # Write base header fields
         output.write(struct.pack('<i', SKC_IDENT_INT))  # ident
-        output.write(struct.pack('<i', SKC_VERSION_CURRENT))  # version
+        output.write(struct.pack('<i', self.version))  # version
         output.write(struct.pack('<i', 0))  # flags
         output.write(struct.pack('<i', total_size))  # nBytesUsed
         output.write(struct.pack('<f', frame_time))  # frameTime
@@ -335,7 +338,8 @@ def export_skc(filepath: str,
                armature_obj: bpy.types.Object,
                action: Optional[bpy.types.Action] = None,
                swap_yz: bool = False,
-               scale: float = 1.0) -> bool:
+               scale: float = 1.0,
+               version: int = SKC_VERSION_CURRENT) -> bool:
     """
     Export animation to SKC file.
     
@@ -345,9 +349,10 @@ def export_skc(filepath: str,
         action: Action to export
         swap_yz: Swap Y and Z axes
         scale: Global scale factor
+        version: SKC version (13 or 14)
         
     Returns:
         True on success
     """
-    exporter = SKCExporter(filepath, armature_obj, action, swap_yz, scale)
+    exporter = SKCExporter(filepath, armature_obj, action, swap_yz, scale, version)
     return exporter.execute()

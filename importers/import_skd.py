@@ -478,7 +478,27 @@ class SKDImporter:
         bone_positions = self.bone_world_positions
         scale = self.scale
         swap_yz = self.swap_yz
-        Vector_cls = Vector
+        # Pre-bind method
+        transform_normal = self._transform_normal
+        transform_uv = self._transform_uv
+
+        # Optimization: Pre-calculate bone world matrices into a faster structure if possible
+        # Currently bone_world_matrices stores (Vector, Matrix)
+        # We can extract the raw data to avoid Vector creation overhead in the loop
+
+        fast_bone_matrices = {}
+        for b_idx, (b_pos, b_rot) in bone_matrices.items():
+            # Store as (pos_x, pos_y, pos_z), (rot_00, rot_01, rot_02, ... rot_22)
+            # Row major:
+            # v.x = r00*x + r01*y + r02*z
+            # v.y = r10*x + r11*y + r12*z
+            # v.z = r20*x + r21*y + r22*z
+            fast_bone_matrices[b_idx] = (
+                (b_pos.x, b_pos.y, b_pos.z),
+                (b_rot[0][0], b_rot[0][1], b_rot[0][2],
+                 b_rot[1][0], b_rot[1][1], b_rot[1][2],
+                 b_rot[2][0], b_rot[2][1], b_rot[2][2])
+            )
 
         vertex_offset = 0
         
@@ -497,29 +517,31 @@ class SKDImporter:
                     bone_idx = weight.bone_index
                     w = weight.bone_weight
 
-                    if bone_idx in bone_matrices:
-                        # Get bone world transform
-                        bone_world_pos, bone_world_rot = bone_matrices[bone_idx]
-                        
-                        # Transform: rotate offset by bone matrix, then add bone position
-                        # We still need Vector for matrix multiplication, but we accumulate scalars
-                        v = bone_world_rot @ Vector_cls(weight.offset)
+                    off_x, off_y, off_z = weight.offset
 
-                        pos_x += (v.x + bone_world_pos.x) * w
-                        pos_y += (v.y + bone_world_pos.y) * w
-                        pos_z += (v.z + bone_world_pos.z) * w
+                    if bone_idx in fast_bone_matrices:
+                        # Get bone world transform (optimized)
+                        (bp_x, bp_y, bp_z), (r00, r01, r02, r10, r11, r12, r20, r21, r22) = fast_bone_matrices[bone_idx]
+                        
+                        # Rotate offset
+                        rx = r00*off_x + r01*off_y + r02*off_z
+                        ry = r10*off_x + r11*off_y + r12*off_z
+                        rz = r20*off_x + r21*off_y + r22*off_z
+
+                        # Add bone position and weight
+                        pos_x += (rx + bp_x) * w
+                        pos_y += (ry + bp_y) * w
+                        pos_z += (rz + bp_z) * w
                         
                     elif bone_idx in bone_positions:
                         # Fallback: just position (no rotation)
-                        bone_pos_tuple = bone_positions[bone_idx]
-                        off_x, off_y, off_z = weight.offset
+                        bp_x, bp_y, bp_z = bone_positions[bone_idx]
 
-                        pos_x += (bone_pos_tuple[0] + off_x) * w
-                        pos_y += (bone_pos_tuple[1] + off_y) * w
-                        pos_z += (bone_pos_tuple[2] + off_z) * w
+                        pos_x += (bp_x + off_x) * w
+                        pos_y += (bp_y + off_y) * w
+                        pos_z += (bp_z + off_z) * w
                     else:
                         # Last fallback: just use weight offset
-                        off_x, off_y, off_z = weight.offset
                         pos_x += off_x * w
                         pos_y += off_y * w
                         pos_z += off_z * w
@@ -531,8 +553,8 @@ class SKDImporter:
                 else:
                     all_verts.append((pos_x * scale, pos_y * scale, pos_z * scale))
                 
-                all_normals.append(self._transform_normal(vertex.normal))
-                all_uvs.append(self._transform_uv(vertex.tex_coords))
+                all_normals.append(transform_normal(vertex.normal))
+                all_uvs.append(transform_uv(vertex.tex_coords))
                 
                 # Collect bone weights
                 vert_weights = []

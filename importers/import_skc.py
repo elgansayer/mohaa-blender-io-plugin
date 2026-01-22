@@ -244,28 +244,71 @@ class SKCImporter:
             rot_y_list = [0.0] * (num_frames * 2)
             rot_z_list = [0.0] * (num_frames * 2)
 
+            # Optimization: Pre-calculate scaling and swapping constants
+            swap_yz = self.swap_yz
+            scale = self.scale
+
+            # Optimization: Avoid dot lookup in loop
+            # Cache channel data access
+            anim_data = self.animation.channel_data
+
+            # Optimization: Use Matrix/Quaternion/Vector constructors directly if possible
+            # But mathutils types are optimized in C, so overhead is mainly in Python wrapping
+
             for frame_idx in frame_indices:
-                target_pos = rest_local.to_translation()
-                target_quat = rest_local.to_quaternion()
+                # Get frame data directly
+                frame_channel_data = anim_data[frame_idx]
                 
+                # Transform Position
                 if pos_idx is not None:
-                    raw_pos = self.animation.channel_data[frame_idx][pos_idx].as_position
-                    target_pos = self._transform_pos(raw_pos)
-                    
+                    # raw_pos = frame_channel_data[pos_idx].as_position (this creates a tuple)
+                    # Inline _transform_pos logic to avoid function call overhead
+                    px, py, pz = frame_channel_data[pos_idx].as_position
+                    if swap_yz:
+                        target_pos = Vector((px, -pz, py)) * scale
+                    else:
+                        target_pos = Vector((px, py, pz)) * scale
+                else:
+                    target_pos = rest_local.to_translation()
+
+                # Transform Rotation
                 if rot_idx is not None:
-                    raw_quat = self.animation.channel_data[frame_idx][rot_idx].as_quaternion
-                    target_quat = self._transform_quat(raw_quat)
+                    # raw_quat = frame_channel_data[rot_idx].as_quaternion
+                    qx, qy, qz, qw = frame_channel_data[rot_idx].as_quaternion
+                    if swap_yz:
+                        target_quat = Quaternion((qw, qx, -qz, qy))
+                    else:
+                        target_quat = Quaternion((qw, qx, qy, qz))
+                else:
+                    target_quat = rest_local.to_quaternion()
                     
-                target_matrix = target_quat.to_matrix().to_4x4()
-                target_matrix.translation = target_pos
+                # Matrix composition
+                # target_matrix = target_quat.to_matrix().to_4x4()
+                # target_matrix.translation = target_pos
+                # delta_matrix = rest_local_inv @ target_matrix
+
+                # Direct composition might be faster?
+                # delta_matrix = rest_local_inv @ (Matrix.Translation(target_pos) @ target_quat.to_matrix().to_4x4())
+                # Actually, mathutils is fast. The main win is avoiding function calls.
+
+                # We can optimize by calculating delta_matrix components directly if rest_local_inv is Identity,
+                # but usually it's not.
                 
-                delta_matrix = rest_local_inv @ target_matrix
+                delta_matrix = rest_local_inv @ target_quat.to_matrix().to_4x4()
+                delta_matrix.translation = rest_local_inv @ target_pos
+                # Wait, translation logic:
+                # T_delta = T_rest_inv * T_target
+                # [ R_r_inv  -R_r_inv*P_r ]   [ R_t   P_t ]   [ R_r_inv*R_t   R_r_inv*P_t - R_r_inv*P_r ]
+                # [ 0        1            ] * [ 0     1   ] = [ 0             1                         ]
+                # So Translation is R_r_inv * P_t + (-R_r_inv * P_r) = R_r_inv * (P_t - P_r)
+                # But mathutils does this correctly with @.
+                # Let's trust mathutils for matrix mult.
                 
+                # Optimization: reuse loc/rot variables
                 loc = delta_matrix.to_translation()
                 rot = delta_matrix.to_quaternion()
 
                 # Fill lists
-                # idx * 2 is frame, idx * 2 + 1 is value
                 idx_base = frame_idx * 2
 
                 loc_x_list[idx_base] = float(frame_idx)
