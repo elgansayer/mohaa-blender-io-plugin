@@ -20,7 +20,8 @@ from io import BytesIO
 from ..formats.skc_format import (
     SKC_IDENT_INT, SKC_VERSION_CURRENT,
     CHANNEL_ROTATION, CHANNEL_POSITION,
-    SKC_HEADER_SIZE, SKC_FRAME_SIZE, SKC_CHANNEL_DATA_SIZE, SKC_CHANNEL_NAME_SIZE
+    SKC_HEADER_SIZE, SKC_FRAME_SIZE, SKC_CHANNEL_DATA_SIZE, SKC_CHANNEL_NAME_SIZE,
+    SKCAnimation, SKCHeader, SKCFrame, SKCChannel, SKCChannelFrame
 )
 
 
@@ -31,7 +32,8 @@ class SKCExporter:
                  armature_obj: bpy.types.Object,
                  action: Optional[bpy.types.Action] = None,
                  swap_yz: bool = False,
-                 scale: float = 1.0):
+                 scale: float = 1.0,
+                 version: int = SKC_VERSION_CURRENT):
         """
         Initialize exporter.
         
@@ -41,12 +43,14 @@ class SKCExporter:
             action: Specific action to export (or use active)
             swap_yz: Swap Y and Z axes
             scale: Global scale factor
+            version: SKC format version (13 or 14)
         """
         self.filepath = filepath
         self.armature_obj = armature_obj
         self.action = action
         self.swap_yz = swap_yz
         self.scale = scale
+        self.version = version
     
     def execute(self) -> bool:
         """
@@ -118,37 +122,20 @@ class SKCExporter:
         frame_time = 1.0 / fps
         
         # Build channel list (rotation + position for each bone)
-        channels: List[Tuple[str, int]] = []  # (name, type)
+        channels: List[SKCChannel] = []
         
         for bone in pose_bones:
-            channels.append((f"{bone.name} rot", CHANNEL_ROTATION))
-            channels.append((f"{bone.name} pos", CHANNEL_POSITION))
+            channels.append(SKCChannel(name=f"{bone.name} rot", channel_type=CHANNEL_ROTATION))
+            channels.append(SKCChannel(name=f"{bone.name} pos", channel_type=CHANNEL_POSITION))
         
         num_channels = len(channels)
-        
-        # Calculate offsets and sizes
-        # Header: 48 bytes base (reduced to match actual file format)
-        # Then (numFrames - 1) * 48 bytes for additional frame headers embedded in header
-        # Actually, the header includes first frame, so frames are embedded
-        
-        # SKC file structure:
-        # - skelAnimDataFileHeader_t (48 bytes + (numFrames-1)*48 for frame array)
-        # - Channel data: numFrames * numChannels * 16 bytes
-        # - Channel names: numChannels * 32 bytes
-        
-        header_and_frames_size = SKC_HEADER_SIZE + (num_frames - 1) * SKC_FRAME_SIZE  # First frame in header
-        channel_data_size = num_frames * num_channels * SKC_CHANNEL_DATA_SIZE
-        channel_names_size = num_channels * SKC_CHANNEL_NAME_SIZE
-        
-        ofs_channel_names = header_and_frames_size + channel_data_size
-        total_size = ofs_channel_names + channel_names_size
         
         # Store current frame
         orig_frame = bpy.context.scene.frame_current
         
-        # Collect frame data
-        frame_data = []  # List of (bounds_min, bounds_max, radius, delta, angle_delta)
-        channel_values = []  # List of List of (x, y, z, w) per frame per channel
+        # Collect data
+        frames: List[SKCFrame] = []
+        all_channel_data: List[List[SKCChannelFrame]] = []
         
         total_delta = [0.0, 0.0, 0.0]
         
@@ -175,22 +162,24 @@ class SKCExporter:
             size = Vector(max_bounds) - Vector(min_bounds)
             radius = size.length / 2.0
             
-            # Delta and angle delta (simplified - would need root motion tracking)
+            # Delta and angle delta (simplified)
             delta = (0.0, 0.0, 0.0)
             angle_delta = 0.0
             
-            frame_data.append({
-                'bounds_min': tuple(min_bounds),
-                'bounds_max': tuple(max_bounds),
-                'radius': radius,
-                'delta': delta,
-                'angle_delta': angle_delta
-            })
+            frames.append(SKCFrame(
+                bounds_min=tuple(min_bounds),
+                bounds_max=tuple(max_bounds),
+                radius=radius,
+                delta=delta,
+                angle_delta=angle_delta,
+                ofs_channels=0 # Will be calculated by SKCAnimation.write
+            ))
             
             # Collect channel data for this frame
             frame_channels = []
-            for channel_name, channel_type in channels:
-                bone_name = channel_name.rsplit(' ', 1)[0]
+            for channel in channels:
+                bone_name = channel.name.rsplit(' ', 1)[0]
+                channel_type = channel.channel_type
                 
                 if bone_name in pose_bones:
                     bone = pose_bones[bone_name]
@@ -213,129 +202,50 @@ class SKCExporter:
                     else:
                         data = (0.0, 0.0, 0.0, 0.0)
                 
-                frame_channels.append(data)
+                frame_channels.append(SKCChannelFrame(data=data))
             
-            channel_values.append(frame_channels)
+            all_channel_data.append(frame_channels)
         
         # Restore original frame
         bpy.context.scene.frame_set(orig_frame)
         
-        # Build binary output
-        output = BytesIO()
-        
-        # Write header (48 bytes)
-        header = struct.pack(
-            '<i i i i f 3f f i i i',
-            SKC_IDENT_INT,  # ident ('SKAN')
-            SKC_VERSION_CURRENT,  # version (14)
-            0,  # flags
-            total_size,  # nBytesUsed
-            frame_time,  # frameTime
-            total_delta[0], total_delta[1], total_delta[2],  # totalDelta
-            0.0,  # totalAngleDelta
-            num_channels,  # numChannels
-            ofs_channel_names,  # ofsChannelNames
-            num_frames  # numFrames
+        # Create Header
+        header = SKCHeader(
+            ident=SKC_IDENT_INT,
+            version=self.version,
+            flags=0,
+            n_bytes_used=0, # Will be calc
+            frame_time=frame_time,
+            total_delta=tuple(total_delta),
+            total_angle_delta=0.0,
+            num_channels=num_channels,
+            ofs_channel_names=0, # Will be calc
+            num_frames=num_frames
         )
-        output.write(header)
         
-        # Write frame headers (48 bytes each, first one is part of header struct)
-        # Actually write all frames including first one
-        for i, frame in enumerate(frame_data):
-            # Calculate channel offset for this frame
-            # Channels start after all frame headers
-            channel_offset = header_and_frames_size + (i * num_channels * SKC_CHANNEL_DATA_SIZE)
-            
-            # Only write additional frames (first is in header)
-            if i > 0:
-                frame_struct = struct.pack(
-                    '<3f 3f f 3f f i',
-                    frame['bounds_min'][0], frame['bounds_min'][1], frame['bounds_min'][2],
-                    frame['bounds_max'][0], frame['bounds_max'][1], frame['bounds_max'][2],
-                    frame['radius'],
-                    frame['delta'][0], frame['delta'][1], frame['delta'][2],
-                    frame['angle_delta'],
-                    channel_offset
-                )
-                output.write(frame_struct)
-        
-        # Pad/write first frame data if needed
-        # The first frame header is embedded in the main header - we handle this by
-        # ensuring our header matches the expected format
-        
-        # For simplicity, write a separate first frame header to complete the structure
-        if num_frames > 0:
-            frame = frame_data[0]
-            channel_offset = header_and_frames_size
-            first_frame = struct.pack(
-                '<3f 3f f 3f f i',
-                frame['bounds_min'][0], frame['bounds_min'][1], frame['bounds_min'][2],
-                frame['bounds_max'][0], frame['bounds_max'][1], frame['bounds_max'][2],
-                frame['radius'],
-                frame['delta'][0], frame['delta'][1], frame['delta'][2],
-                frame['angle_delta'],
-                channel_offset
-            )
-            # Insert at correct position (after base header, before other frames)
-            # Actually rewrite the output properly
-        
-        # Rewrite with correct structure
-        output = BytesIO()
-        
-        # Write complete header with embedded first frame
-        # skelAnimDataFileHeader_t ends with frame[1] which is the first skelAnimFileFrame_t
-        # So header is 48 bytes, but the frame[1] array extends it
-        
-        # Write base header fields
-        output.write(struct.pack('<i', SKC_IDENT_INT))  # ident
-        output.write(struct.pack('<i', SKC_VERSION_CURRENT))  # version
-        output.write(struct.pack('<i', 0))  # flags
-        output.write(struct.pack('<i', total_size))  # nBytesUsed
-        output.write(struct.pack('<f', frame_time))  # frameTime
-        output.write(struct.pack('<3f', total_delta[0], total_delta[1], total_delta[2]))  # totalDelta
-        output.write(struct.pack('<f', 0.0))  # totalAngleDelta
-        output.write(struct.pack('<i', num_channels))  # numChannels
-        output.write(struct.pack('<i', ofs_channel_names))  # ofsChannelNames
-        output.write(struct.pack('<i', num_frames))  # numFrames
-        
-        # Write all frame headers (first one is frame[1] in the header struct)
-        for i, frame in enumerate(frame_data):
-            channel_offset = header_and_frames_size + (i * num_channels * SKC_CHANNEL_DATA_SIZE)
-            
-            output.write(struct.pack(
-                '<3f 3f f 3f f i',
-                frame['bounds_min'][0], frame['bounds_min'][1], frame['bounds_min'][2],
-                frame['bounds_max'][0], frame['bounds_max'][1], frame['bounds_max'][2],
-                frame['radius'],
-                frame['delta'][0], frame['delta'][1], frame['delta'][2],
-                frame['angle_delta'],
-                channel_offset
-            ))
-        
-        # Write channel data for all frames
-        for frame_idx, frame_channels in enumerate(channel_values):
-            for channel_data in frame_channels:
-                output.write(struct.pack('<4f', *channel_data))
-        
-        # Write channel names
-        for channel_name, _ in channels:
-            name_bytes = channel_name.encode('latin-1')[:32].ljust(32, b'\x00')
-            output.write(name_bytes)
+        # Create Animation Object
+        animation = SKCAnimation(
+            header=header,
+            frames=frames,
+            channels=channels,
+            channel_data=all_channel_data
+        )
         
         # Write to file
-        with open(self.filepath, 'wb') as f:
-            f.write(output.getvalue())
+        animation.write(self.filepath, version=self.version)
         
         print(f"  Frames: {num_frames}")
         print(f"  Channels: {num_channels}")
         print(f"  FPS: {fps}")
+        print(f"  Version: {self.version}")
 
 
 def export_skc(filepath: str,
                armature_obj: bpy.types.Object,
                action: Optional[bpy.types.Action] = None,
                swap_yz: bool = False,
-               scale: float = 1.0) -> bool:
+               scale: float = 1.0,
+               version: int = SKC_VERSION_CURRENT) -> bool:
     """
     Export animation to SKC file.
     
@@ -345,9 +255,10 @@ def export_skc(filepath: str,
         action: Action to export
         swap_yz: Swap Y and Z axes
         scale: Global scale factor
+        version: SKC format version
         
     Returns:
         True on success
     """
-    exporter = SKCExporter(filepath, armature_obj, action, swap_yz, scale)
+    exporter = SKCExporter(filepath, armature_obj, action, swap_yz, scale, version)
     return exporter.execute()

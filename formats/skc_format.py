@@ -264,6 +264,67 @@ class SKCAnimation:
     channels: List[SKCChannel]
     channel_data: List[List[SKCChannelFrame]]  # [frame][channel]
     
+    def write(self, filepath: str, version: int = SKC_VERSION_CURRENT) -> None:
+        """Write complete SKC animation to file"""
+        # Update header fields
+        self.header.version = version
+        self.header.ident = SKC_IDENT_INT
+        self.header.num_frames = len(self.frames)
+        self.header.num_channels = len(self.channels)
+
+        # Calculate sizes
+        # Header (48) + Frames * 48
+        # Note: frame[1] array in C struct follows header, effectively making frames contiguous
+        # after the fixed header part.
+        header_and_frames_size = SKC_HEADER_SIZE + (len(self.frames) * SKC_FRAME_SIZE)
+
+        channel_data_size = len(self.frames) * len(self.channels) * SKC_CHANNEL_DATA_SIZE
+        channel_names_size = len(self.channels) * SKC_CHANNEL_NAME_SIZE
+
+        self.header.ofs_channel_names = header_and_frames_size + channel_data_size
+        self.header.n_bytes_used = self.header.ofs_channel_names + channel_names_size
+
+        with open(filepath, 'wb') as f:
+            # Write Header
+            self.header.write(f)
+
+            # Write Frames
+            # Update ofs_channels for each frame
+            channel_data_start = header_and_frames_size
+
+            for i, frame in enumerate(self.frames):
+                frame.ofs_channels = channel_data_start + (i * len(self.channels) * SKC_CHANNEL_DATA_SIZE)
+                frame.write(f)
+
+            # Write Channel Data (Optimized)
+            total_items = len(self.frames) * len(self.channels)
+            buffer = bytearray(total_items * SKC_CHANNEL_DATA_SIZE)
+            offset = 0
+            pack_into = struct.pack_into
+            fmt = SKC_CHANNEL_DATA_FORMAT
+
+            for frame_data in self.channel_data:
+                for channel_frame in frame_data:
+                    d = channel_frame.data
+                    ld = len(d)
+                    if ld == 4:
+                        pack_into(fmt, buffer, offset, d[0], d[1], d[2], d[3])
+                    elif ld == 3:
+                        pack_into(fmt, buffer, offset, d[0], d[1], d[2], 0.0)
+                    elif ld == 1:
+                        pack_into(fmt, buffer, offset, d[0], 0.0, 0.0, 0.0)
+                    else:
+                        padded = d + (0.0,) * (4 - ld)
+                        pack_into(fmt, buffer, offset, *padded[:4])
+                    offset += SKC_CHANNEL_DATA_SIZE
+
+            f.write(buffer)
+
+            # Write Channel Names
+            for channel in self.channels:
+                name_bytes = channel.name.encode('latin-1')[:32].ljust(32, b'\x00')
+                f.write(name_bytes)
+
     @classmethod
     def read(cls, filepath: str) -> 'SKCAnimation':
         """Read complete SKC animation from file"""
