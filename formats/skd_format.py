@@ -267,8 +267,7 @@ class SKDHeader:
                 self.num_surfaces, self.num_bones,
                 self.ofs_bones, self.ofs_surfaces, self.ofs_end,
                 *self.lod_index,
-                self.num_boxes, self.ofs_boxes,
-                self.num_morph_targets, self.ofs_morph_targets
+                self.num_boxes, self.ofs_boxes
             )
         f.write(data)
 
@@ -615,6 +614,159 @@ class SKDModel:
     bones: List[SKDBoneFileData]
     morph_target_names: List[str] = field(default_factory=list)
     
+    def write(self, filepath: str, version: int = SKD_VERSION_CURRENT) -> None:
+        """Write complete SKD model to file"""
+        self.header.version = version
+        self.header.ident = SKD_IDENT_INT
+
+        # Calculate sizes and offsets
+        if version >= 6:
+            header_size = SKD_HEADER_V6_SIZE
+        else:
+            header_size = SKD_HEADER_V5_SIZE
+            # Reset V6 specific fields
+            self.header.scale = 1.0
+            self.header.num_morph_targets = 0
+            self.header.ofs_morph_targets = 0
+
+        # Update header counts
+        self.header.num_surfaces = len(self.surfaces)
+        self.header.num_bones = len(self.bones)
+
+        # We need to calculate surface sizes first to know where bones go
+        surface_data_size = 0
+        surface_infos = [] # Store calculated offsets/sizes for writing later
+
+        for surface in self.surfaces:
+            num_tris = len(surface.triangles)
+            num_verts = len(surface.vertices)
+
+            # Header
+            surf_header_size = SKD_SURFACE_SIZE
+
+            # Triangles
+            tris_size = num_tris * SKD_TRIANGLE_SIZE
+
+            # Vertices - Variable size!
+            verts_size = 0
+            for v in surface.vertices:
+                # 24 bytes header + morphs + weights
+                v_size = SKD_VERTEX_SIZE + (len(v.morphs) * SKD_MORPH_SIZE) + (len(v.weights) * SKD_WEIGHT_SIZE)
+                verts_size += v_size
+
+            # Collapse maps
+            collapse_size = num_verts * 4 # int array
+            collapse_idx_size = num_verts * 4 # int array
+
+            total_surf_size = surf_header_size + tris_size + verts_size + collapse_size + collapse_idx_size
+
+            # Offsets are relative to the start of the SURFACE header
+            info = {
+                'ofs_triangles': surf_header_size,
+                'ofs_verts': surf_header_size + tris_size,
+                'ofs_collapse': surf_header_size + tris_size + verts_size,
+                'ofs_end': total_surf_size,
+                'ofs_collapse_index': surf_header_size + tris_size + verts_size + collapse_size,
+                'total_size': total_surf_size
+            }
+            surface_infos.append(info)
+            surface_data_size += total_surf_size
+
+        # Set global offsets
+        self.header.ofs_surfaces = header_size
+        self.header.ofs_bones = header_size + surface_data_size
+
+        # Calculate bone size
+        bone_data_size = 0
+        for bone in self.bones:
+            # We enforce standard layout for writing: 84 base + 12 offset
+            bone_data_size += (SKD_BONE_FILE_DATA_BASE_SIZE + 12)
+
+        self.header.ofs_end = self.header.ofs_bones + bone_data_size
+
+        # Morph targets (V6 only)
+        if version >= 6 and self.morph_target_names:
+            self.header.num_morph_targets = len(self.morph_target_names)
+            self.header.ofs_morph_targets = self.header.ofs_end
+
+        with open(filepath, 'wb') as f:
+            # Write Header
+            self.header.write(f)
+
+            # Write Surfaces
+            for i, surface in enumerate(self.surfaces):
+                info = surface_infos[i]
+
+                # Update surface header offsets
+                surface.header.num_triangles = len(surface.triangles)
+                surface.header.num_verts = len(surface.vertices)
+                surface.header.ofs_triangles = info['ofs_triangles']
+                surface.header.ofs_verts = info['ofs_verts']
+                surface.header.ofs_collapse = info['ofs_collapse']
+                surface.header.ofs_end = info['total_size']
+                surface.header.ofs_collapse_index = info['ofs_collapse_index']
+
+                surface.header.write(f)
+
+                # Write Triangles (Bulk)
+                tris_buffer = bytearray(len(surface.triangles) * SKD_TRIANGLE_SIZE)
+                tris_offset = 0
+                pack_into = struct.pack_into
+                for tri in surface.triangles:
+                    pack_into('<3i', tris_buffer, tris_offset, tri.indices[0], tri.indices[1], tri.indices[2])
+                    tris_offset += SKD_TRIANGLE_SIZE
+                f.write(tris_buffer)
+
+                # Write Vertices
+                for v in surface.vertices:
+                    # Header
+                    f.write(struct.pack(SKD_VERTEX_FORMAT,
+                        v.normal[0], v.normal[1], v.normal[2],
+                        v.tex_coords[0], v.tex_coords[1],
+                        len(v.weights), len(v.morphs)
+                    ))
+                    # Morphs
+                    for m in v.morphs:
+                        f.write(struct.pack(SKD_MORPH_FORMAT,
+                            m.morph_index,
+                            m.offset[0], m.offset[1], m.offset[2]
+                        ))
+                    # Weights
+                    for w in v.weights:
+                        f.write(struct.pack(SKD_WEIGHT_FORMAT,
+                            w.bone_index, w.bone_weight,
+                            w.offset[0], w.offset[1], w.offset[2]
+                        ))
+
+                # Write Collapse Maps (Dummy identity)
+                collapse_buffer = bytearray(len(surface.vertices) * 4)
+                for vi in range(len(surface.vertices)):
+                    struct.pack_into('<i', collapse_buffer, vi*4, vi)
+                f.write(collapse_buffer) # Collapse Map
+                f.write(collapse_buffer) # Collapse Index
+
+            # Write Bones
+            for bone in self.bones:
+                ofs_base = 84
+
+                f.write(struct.pack(
+                    SKD_BONE_FILE_DATA_FORMAT,
+                    bone.name.encode('latin-1')[:32].ljust(32, b'\x00'),
+                    bone.parent.encode('latin-1')[:32].ljust(32, b'\x00'),
+                    bone.bone_type,
+                    ofs_base,
+                    0, # ofsChannelNames
+                    0, # ofsBoneNames
+                    ofs_base + 12 # ofsEnd
+                ))
+
+                f.write(struct.pack('<3f', bone.offset[0], bone.offset[1], bone.offset[2]))
+
+            # Write Morph Target Names (V6)
+            if version >= 6 and self.morph_target_names:
+                for name in self.morph_target_names:
+                    f.write(name.encode('latin-1') + b'\x00')
+
     @classmethod
     def read(cls, filepath: str) -> 'SKDModel':
         """Read complete SKD model from file"""
