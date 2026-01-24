@@ -478,7 +478,19 @@ class SKDImporter:
         bone_positions = self.bone_world_positions
         scale = self.scale
         swap_yz = self.swap_yz
-        Vector_cls = Vector
+
+        # Pre-calculate raw bone matrices to avoid Vector/Matrix overhead in inner loops
+        raw_bone_matrices = {}
+        for b_idx, (b_pos, b_rot) in bone_matrices.items():
+            # Store as tuple of tuples for faster access: (pos_tuple, rot_rows_tuple)
+            raw_bone_matrices[b_idx] = (
+                (b_pos.x, b_pos.y, b_pos.z),
+                (
+                    (b_rot[0][0], b_rot[0][1], b_rot[0][2]),
+                    (b_rot[1][0], b_rot[1][1], b_rot[1][2]),
+                    (b_rot[2][0], b_rot[2][1], b_rot[2][2])
+                )
+            )
 
         vertex_offset = 0
         
@@ -497,17 +509,22 @@ class SKDImporter:
                     bone_idx = weight.bone_index
                     w = weight.bone_weight
 
-                    if bone_idx in bone_matrices:
+                    if bone_idx in raw_bone_matrices:
                         # Get bone world transform
-                        bone_world_pos, bone_world_rot = bone_matrices[bone_idx]
+                        (bp_x, bp_y, bp_z), b_rot = raw_bone_matrices[bone_idx]
                         
                         # Transform: rotate offset by bone matrix, then add bone position
-                        # We still need Vector for matrix multiplication, but we accumulate scalars
-                        v = bone_world_rot @ Vector_cls(weight.offset)
+                        # Manual matrix multiplication to avoid Vector instantiation
+                        ox, oy, oz = weight.offset
 
-                        pos_x += (v.x + bone_world_pos.x) * w
-                        pos_y += (v.y + bone_world_pos.y) * w
-                        pos_z += (v.z + bone_world_pos.z) * w
+                        # v = rot @ offset
+                        vx = b_rot[0][0]*ox + b_rot[0][1]*oy + b_rot[0][2]*oz
+                        vy = b_rot[1][0]*ox + b_rot[1][1]*oy + b_rot[1][2]*oz
+                        vz = b_rot[2][0]*ox + b_rot[2][1]*oy + b_rot[2][2]*oz
+
+                        pos_x += (vx + bp_x) * w
+                        pos_y += (vy + bp_y) * w
+                        pos_z += (vz + bp_z) * w
                         
                     elif bone_idx in bone_positions:
                         # Fallback: just position (no rotation)

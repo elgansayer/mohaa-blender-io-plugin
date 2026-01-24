@@ -631,6 +631,9 @@ class SKDModel:
         
         # Read header
         header = SKDHeader.read(f)
+
+        if header.version > SKD_VERSION_CURRENT:
+            print(f"Warning: Newer SKD version {header.version} detected, attempting to parse as version {SKD_VERSION_CURRENT}")
         
         # Validate header
         if header.ident not in (SKD_IDENT_INT, SKB_IDENT_INT):
@@ -647,8 +650,10 @@ class SKDModel:
             # Read triangles
             f.seek(surface_start + surface_header.ofs_triangles)
             triangles = []
-            for _ in range(surface_header.num_triangles):
-                triangles.append(SKDTriangle.read(f))
+            if surface_header.num_triangles > 0:
+                triangle_block = f.read(surface_header.num_triangles * SKD_TRIANGLE_SIZE)
+                for unpacked in struct.iter_unpack(SKD_TRIANGLE_FORMAT, triangle_block):
+                    triangles.append(SKDTriangle(indices=unpacked))
             
             # Read vertices
             f.seek(surface_start + surface_header.ofs_verts)

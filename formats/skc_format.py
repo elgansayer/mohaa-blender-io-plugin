@@ -286,19 +286,19 @@ class SKCAnimation:
             raise ValueError(f"Invalid SKC file identifier: {ident:08x}")
         
         # Check version and determine header format
-        if version in (10, 11, 12):
-            # Old format: has 64-byte filename after version
+        if version < 13:
+            # Old format (10-12) or unknown older version
             # Format: [ident:4][version:4][filename:64][...rest of header]
+            if version not in (10, 11, 12):
+                print(f"Warning: Unknown SKC version {version}, attempting to parse as Old format")
+
             header = cls._read_old_header(f, ident, version)
             header_size = 8 + 64 + 40  # ident+ver + filename + rest of old header
-        elif version in (13, 14):
-            # New format: standard header
-            f.seek(0)
-            header = SKCHeader.read(f)
-            header_size = SKC_HEADER_SIZE
         else:
-            # Unknown version - try old format first, then new
-            print(f"Warning: Unknown SKC version {version}, attempting to parse")
+            # Standard format (13-14) or newer
+            if version > 14:
+                print(f"Warning: Newer SKC version {version} detected, attempting to parse as Standard format")
+
             f.seek(0)
             header = SKCHeader.read(f)
             header_size = SKC_HEADER_SIZE
@@ -308,9 +308,19 @@ class SKCAnimation:
             return cls(header=header, frames=[], channels=[], channel_data=[])
         
         # Read frame headers
+        # Bulk read optimization
         frames = []
-        for _ in range(header.num_frames):
-            frames.append(SKCFrame.read(f))
+        if header.num_frames > 0:
+            frame_data_block = f.read(header.num_frames * SKC_FRAME_SIZE)
+            for unpacked in struct.iter_unpack(SKC_FRAME_FORMAT, frame_data_block):
+                frames.append(SKCFrame(
+                    bounds_min=(unpacked[0], unpacked[1], unpacked[2]),
+                    bounds_max=(unpacked[3], unpacked[4], unpacked[5]),
+                    radius=unpacked[6],
+                    delta=(unpacked[7], unpacked[8], unpacked[9]),
+                    angle_delta=unpacked[10],
+                    ofs_channels=unpacked[11]
+                ))
         
         # Read channel names
         channels = []
