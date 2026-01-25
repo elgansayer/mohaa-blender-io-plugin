@@ -309,17 +309,32 @@ class SKCAnimation:
         
         # Read frame headers
         frames = []
-        for _ in range(header.num_frames):
-            frames.append(SKCFrame.read(f))
+        if header.num_frames > 0:
+            # Bulk read frames
+            frames_data = f.read(header.num_frames * SKC_FRAME_SIZE)
+            frames = [
+                SKCFrame(
+                    bounds_min=(t[0], t[1], t[2]),
+                    bounds_max=(t[3], t[4], t[5]),
+                    radius=t[6],
+                    delta=(t[7], t[8], t[9]),
+                    angle_delta=t[10],
+                    ofs_channels=t[11]
+                )
+                for t in struct.iter_unpack(SKC_FRAME_FORMAT, frames_data)
+            ]
         
         # Read channel names
         channels = []
-        if header.ofs_channel_names > 0:
+        if header.ofs_channel_names > 0 and header.num_channels > 0:
             f.seek(header.ofs_channel_names)
-            for _ in range(header.num_channels):
-                name_data = f.read(SKC_CHANNEL_NAME_SIZE)
-                name = name_data.rstrip(b'\x00').decode('latin-1')
-                channels.append(SKCChannel.from_name(name))
+
+            # Bulk read channel names
+            names_data = f.read(header.num_channels * SKC_CHANNEL_NAME_SIZE)
+            channels = [
+                SKCChannel.from_name(t[0].rstrip(b'\x00').decode('latin-1'))
+                for t in struct.iter_unpack(SKC_CHANNEL_NAME_FORMAT, names_data)
+            ]
         
         # Read channel data for each frame
         channel_data_start = header_size + (header.num_frames * SKC_FRAME_SIZE)

@@ -24,9 +24,10 @@ from ..formats.skd_format import (
     SKDModel, SKDHeader, SKDSurface, SKDSurfaceData,
     SKDVertex, SKDWeight, SKDMorph, SKDBoneFileData, SKDTriangle,
     SKD_IDENT_INT, SKD_VERSION_CURRENT, SKD_VERSION_OLD, SKELBONE_POSROT,
-    SKD_HEADER_V6_SIZE, SKD_SURFACE_SIZE, SKD_VERTEX_SIZE,
+    SKD_HEADER_V6_SIZE, SKD_HEADER_V5_SIZE, SKD_SURFACE_SIZE, SKD_VERTEX_SIZE,
     SKD_WEIGHT_SIZE, SKD_MORPH_SIZE, SKD_TRIANGLE_SIZE,
-    SKD_BONE_NAME_SIZE, SKD_BONE_FILE_DATA_BASE_SIZE
+    SKD_BONE_NAME_SIZE, SKD_BONE_FILE_DATA_BASE_SIZE,
+    SKD_TRIANGLE_FORMAT
 )
 
 
@@ -38,7 +39,8 @@ class SKDExporter:
                  armature_obj: Optional[bpy.types.Object] = None,
                  flip_uvs: bool = True,
                  swap_yz: bool = False,
-                 scale: float = 1.0):
+                 scale: float = 1.0,
+                 version: int = SKD_VERSION_CURRENT):
         """
         Initialize exporter.
         
@@ -56,6 +58,7 @@ class SKDExporter:
         self.flip_uvs = flip_uvs
         self.swap_yz = swap_yz
         self.scale = scale
+        self.version = version
         
         self.bone_indices: Dict[str, int] = {}  # Bone name -> index
     
@@ -297,8 +300,19 @@ class SKDExporter:
         
         model_name = os.path.splitext(os.path.basename(self.filepath))[0]
         
+        # Check version constraints
+        if self.version < SKD_VERSION_CURRENT:
+             # V5 doesn't support scale or morphs
+             if abs(self.scale - 1.0) > 0.001:
+                 print(f"Warning: SKD Version {self.version} does not support scale. Scale {self.scale} will be baked or ignored (depending on implementation).")
+                 # Here we are inverse scaling geometry, so it IS baked. The header scale is mostly for runtime.
+                 pass
+
         # Calculate sizes and offsets
-        header_size = SKD_HEADER_V6_SIZE  # 144 bytes
+        if self.version >= SKD_VERSION_CURRENT:
+            header_size = SKD_HEADER_V6_SIZE
+        else:
+            header_size = SKD_HEADER_V5_SIZE
         
         # Calculate bone data size (using boneFileData_t format: 84 bytes base + 12 bytes offset)
         bone_data_size = len(bones) * (SKD_BONE_FILE_DATA_BASE_SIZE + 12)
@@ -359,23 +373,39 @@ class SKDExporter:
         output = BytesIO()
         
         # Write header
-        header_data = struct.pack(
-            '<i i 64s i i i i i 10i i i i i f',
-            SKD_IDENT_INT,  # ident
-            SKD_VERSION_CURRENT,  # version (6)
-            model_name.encode('latin-1').ljust(64, b'\x00'),  # name
-            len(surfaces),  # numSurfaces
-            len(bones),  # numBones
-            ofs_bones,  # ofsBones
-            ofs_surfaces,  # ofsSurfaces
-            ofs_end,  # ofsEnd
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0,  # lodIndex[10]
-            0,  # numBoxes
-            0,  # ofsBoxes
-            0,  # numMorphTargets
-            0,  # ofsMorphTargets
-            1.0 / self.scale if self.scale != 0 else 1.0  # scale
-        )
+        if self.version >= SKD_VERSION_CURRENT:
+            header_data = struct.pack(
+                '<i i 64s i i i i i 10i i i i i f',
+                SKD_IDENT_INT,  # ident
+                self.version,
+                model_name.encode('latin-1').ljust(64, b'\x00'),  # name
+                len(surfaces),  # numSurfaces
+                len(bones),  # numBones
+                ofs_bones,  # ofsBones
+                ofs_surfaces,  # ofsSurfaces
+                ofs_end,  # ofsEnd
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0,  # lodIndex[10]
+                0,  # numBoxes
+                0,  # ofsBoxes
+                0,  # numMorphTargets
+                0,  # ofsMorphTargets
+                1.0 / self.scale if self.scale != 0 else 1.0  # scale
+            )
+        else:
+            header_data = struct.pack(
+                '<i i 64s i i i i i 10i i i',
+                SKD_IDENT_INT,  # ident
+                self.version,
+                model_name.encode('latin-1').ljust(64, b'\x00'),  # name
+                len(surfaces),  # numSurfaces
+                len(bones),  # numBones
+                ofs_bones,  # ofsBones
+                ofs_surfaces,  # ofsSurfaces
+                ofs_end,  # ofsEnd
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0,  # lodIndex[10]
+                0,  # numBoxes
+                0   # ofsBoxes
+            )
         output.write(header_data)
         
         # Write surfaces
@@ -408,43 +438,45 @@ class SKDExporter:
             )
             output.write(surf_header)
             
-            # Write triangles (3 ints each = 12 bytes)
-            for tri in surf_info['triangles']:
-                output.write(struct.pack('<3i', tri[0], tri[1], tri[2]))
+            # Write triangles (Bulk)
+            if surf_info['triangles']:
+                output.write(b''.join(struct.pack('<3i', *tri) for tri in surf_info['triangles']))
+
+            # Write vertices (Buffered)
+            vert_buffer = bytearray()
             
-            # Write vertices
             for vert in surf_info['vertices']:
                 # Vertex header (24 bytes)
                 num_weights = len(vert['weights'])
                 num_morphs = len(vert['morphs'])
                 
-                vert_data = struct.pack(
+                # Pack header
+                vert_buffer.extend(struct.pack(
                     '<3f 2f i i',
                     vert['normal'][0], vert['normal'][1], vert['normal'][2],
                     vert['tex_coords'][0], vert['tex_coords'][1],
                     num_weights,
                     num_morphs
-                )
-                output.write(vert_data)
+                ))
                 
-                # Write morphs (16 bytes each)
+                # Pack morphs
                 for morph in vert['morphs']:
-                    morph_data = struct.pack(
+                    vert_buffer.extend(struct.pack(
                         '<i 3f',
                         morph['morph_index'],
                         morph['offset'][0], morph['offset'][1], morph['offset'][2]
-                    )
-                    output.write(morph_data)
+                    ))
                 
-                # Write weights (20 bytes each)
+                # Pack weights
                 for weight in vert['weights']:
-                    weight_data = struct.pack(
+                    vert_buffer.extend(struct.pack(
                         '<i f 3f',
                         weight['bone_index'],
                         weight['bone_weight'],
                         weight['offset'][0], weight['offset'][1], weight['offset'][2]
-                    )
-                    output.write(weight_data)
+                    ))
+
+            output.write(vert_buffer)
             
             # Write collapse map (identity for now)
             for v in range(num_verts):
@@ -501,7 +533,8 @@ def export_skd(filepath: str,
                armature_obj: Optional[bpy.types.Object] = None,
                flip_uvs: bool = True,
                swap_yz: bool = False,
-               scale: float = 1.0) -> bool:
+               scale: float = 1.0,
+               version: int = SKD_VERSION_CURRENT) -> bool:
     """
     Export mesh to SKD file.
     
@@ -512,9 +545,10 @@ def export_skd(filepath: str,
         flip_uvs: Flip V coordinate
         swap_yz: Swap Y and Z axes
         scale: Global scale factor
+        version: SKD version (5 or 6)
         
     Returns:
         True on success
     """
-    exporter = SKDExporter(filepath, mesh_obj, armature_obj, flip_uvs, swap_yz, scale)
+    exporter = SKDExporter(filepath, mesh_obj, armature_obj, flip_uvs, swap_yz, scale, version)
     return exporter.execute()

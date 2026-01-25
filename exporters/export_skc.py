@@ -31,7 +31,8 @@ class SKCExporter:
                  armature_obj: bpy.types.Object,
                  action: Optional[bpy.types.Action] = None,
                  swap_yz: bool = False,
-                 scale: float = 1.0):
+                 scale: float = 1.0,
+                 version: int = SKC_VERSION_CURRENT):
         """
         Initialize exporter.
         
@@ -41,12 +42,14 @@ class SKCExporter:
             action: Specific action to export (or use active)
             swap_yz: Swap Y and Z axes
             scale: Global scale factor
+            version: SKC version (13 or 14)
         """
         self.filepath = filepath
         self.armature_obj = armature_obj
         self.action = action
         self.swap_yz = swap_yz
         self.scale = scale
+        self.version = version
     
     def execute(self) -> bool:
         """
@@ -288,7 +291,7 @@ class SKCExporter:
         
         # Write base header fields
         output.write(struct.pack('<i', SKC_IDENT_INT))  # ident
-        output.write(struct.pack('<i', SKC_VERSION_CURRENT))  # version
+        output.write(struct.pack('<i', self.version))  # version
         output.write(struct.pack('<i', 0))  # flags
         output.write(struct.pack('<i', total_size))  # nBytesUsed
         output.write(struct.pack('<f', frame_time))  # frameTime
@@ -298,11 +301,11 @@ class SKCExporter:
         output.write(struct.pack('<i', ofs_channel_names))  # ofsChannelNames
         output.write(struct.pack('<i', num_frames))  # numFrames
         
-        # Write all frame headers (first one is frame[1] in the header struct)
+        # Write all frame headers (Bulk)
+        frame_buffer = bytearray()
         for i, frame in enumerate(frame_data):
             channel_offset = header_and_frames_size + (i * num_channels * SKC_CHANNEL_DATA_SIZE)
-            
-            output.write(struct.pack(
+            frame_buffer.extend(struct.pack(
                 '<3f 3f f 3f f i',
                 frame['bounds_min'][0], frame['bounds_min'][1], frame['bounds_min'][2],
                 frame['bounds_max'][0], frame['bounds_max'][1], frame['bounds_max'][2],
@@ -311,16 +314,21 @@ class SKCExporter:
                 frame['angle_delta'],
                 channel_offset
             ))
+        output.write(frame_buffer)
         
-        # Write channel data for all frames
-        for frame_idx, frame_channels in enumerate(channel_values):
-            for channel_data in frame_channels:
-                output.write(struct.pack('<4f', *channel_data))
+        # Write channel data for all frames (Bulk per frame)
+        for frame_channels in channel_values:
+            # Flatten channels for this frame
+            frame_chan_flat = []
+            for cd in frame_channels:
+                frame_chan_flat.extend(cd)
+
+            # Pack all channels for this frame at once
+            fmt = f'<{len(frame_channels)*4}f'
+            output.write(struct.pack(fmt, *frame_chan_flat))
         
-        # Write channel names
-        for channel_name, _ in channels:
-            name_bytes = channel_name.encode('latin-1')[:32].ljust(32, b'\x00')
-            output.write(name_bytes)
+        # Write channel names (Bulk)
+        output.write(b''.join(name.encode('latin-1')[:32].ljust(32, b'\x00') for name, _ in channels))
         
         # Write to file
         with open(self.filepath, 'wb') as f:
@@ -335,7 +343,8 @@ def export_skc(filepath: str,
                armature_obj: bpy.types.Object,
                action: Optional[bpy.types.Action] = None,
                swap_yz: bool = False,
-               scale: float = 1.0) -> bool:
+               scale: float = 1.0,
+               version: int = SKC_VERSION_CURRENT) -> bool:
     """
     Export animation to SKC file.
     
@@ -345,9 +354,10 @@ def export_skc(filepath: str,
         action: Action to export
         swap_yz: Swap Y and Z axes
         scale: Global scale factor
+        version: SKC version (13 or 14)
         
     Returns:
         True on success
     """
-    exporter = SKCExporter(filepath, armature_obj, action, swap_yz, scale)
+    exporter = SKCExporter(filepath, armature_obj, action, swap_yz, scale, version)
     return exporter.execute()
