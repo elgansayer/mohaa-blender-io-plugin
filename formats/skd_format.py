@@ -24,6 +24,7 @@ SKD_IDENT_INT = 0x444D4B53
 # Supported versions
 SKD_VERSION_OLD = 5  # TIKI_SKD_HEADER_OLD_VERSION
 SKD_VERSION_CURRENT = 6  # TIKI_SKD_HEADER_VERSION
+SKD_SUPPORTED_VERSIONS = (5, 6)
 
 # SKB (older format) identifiers
 SKB_IDENT = b'SKL '  # (*(int *)"SKL ") 
@@ -646,9 +647,17 @@ class SKDModel:
             
             # Read triangles
             f.seek(surface_start + surface_header.ofs_triangles)
-            triangles = []
-            for _ in range(surface_header.num_triangles):
-                triangles.append(SKDTriangle.read(f))
+
+            # Bulk read triangles for performance
+            if surface_header.num_triangles > 0:
+                tri_data_size = surface_header.num_triangles * SKD_TRIANGLE_SIZE
+                tri_data = f.read(tri_data_size)
+                triangles = [
+                    SKDTriangle(indices=t)
+                    for t in struct.iter_unpack(SKD_TRIANGLE_FORMAT, tri_data)
+                ]
+            else:
+                triangles = []
             
             # Read vertices
             f.seek(surface_start + surface_header.ofs_verts)
