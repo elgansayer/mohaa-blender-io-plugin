@@ -70,6 +70,7 @@ class SKDImporter:
         self.mesh_obj: Optional[bpy.types.Object] = None
         self.bone_name_map: Dict[str, str] = {}  # Original name -> Blender name
         self.bone_world_positions: Dict[int, Tuple[float, float, float]] = {}  # bone_index -> world pos (RAW)
+        self.bone_world_matrices_flat: Dict[int, Tuple[float, ...]] = {} # Flattened matrices for optimization
     
     def execute(self) -> Tuple[Optional[bpy.types.Object], Optional[bpy.types.Object]]:
         """
@@ -173,6 +174,7 @@ class SKDImporter:
         
         # Initialize matrices dict
         self.bone_world_matrices = {}  # bone_idx -> (world_pos_array, world_rot_3x3)
+        self.bone_world_matrices_flat = {} # bone_idx -> (px, py, pz, r00, r01, r02, r10, r11, r12, r20, r21, r22)
         
         # Parse SKC channels if we have an SKC file
         skc_channels = {}
@@ -246,6 +248,15 @@ class SKDImporter:
             # Also store position tuple for backward compatibility
             self.bone_world_positions[bone_idx] = tuple(world_pos)
             
+            # Store flattened version for fast access
+            # (px, py, pz, r00, r01, r02, r10, r11, r12, r20, r21, r22)
+            self.bone_world_matrices_flat[bone_idx] = (
+                world_pos.x, world_pos.y, world_pos.z,
+                world_rot[0][0], world_rot[0][1], world_rot[0][2],
+                world_rot[1][0], world_rot[1][1], world_rot[1][2],
+                world_rot[2][0], world_rot[2][1], world_rot[2][2]
+            )
+
             # Find children and recurse
             for child_idx, child_bone in enumerate(self.model.bones):
                 if child_bone.parent == bone.name:
@@ -474,11 +485,10 @@ class SKDImporter:
         face_materials: List[int] = []  # Material index per face
         
         # Local cache for performance
-        bone_matrices = self.bone_world_matrices
+        bone_matrices_flat = self.bone_world_matrices_flat
         bone_positions = self.bone_world_positions
         scale = self.scale
         swap_yz = self.swap_yz
-        Vector_cls = Vector
 
         vertex_offset = 0
         
@@ -487,7 +497,7 @@ class SKDImporter:
             for vertex in surface.vertices:
                 # Calculate position using bone matrices
                 # Formula: vertex = sum((bone_rotation @ weight_offset + bone_position) * weight)
-                # Optimized to avoid Vector accumulation and intermediate tuples
+                # Optimized to use flat float tuples and avoid Vector/Matrix instantiation
 
                 pos_x = 0.0
                 pos_y = 0.0
@@ -496,30 +506,32 @@ class SKDImporter:
                 for weight in vertex.weights:
                     bone_idx = weight.bone_index
                     w = weight.bone_weight
+                    off_x, off_y, off_z = weight.offset
 
-                    if bone_idx in bone_matrices:
-                        # Get bone world transform
-                        bone_world_pos, bone_world_rot = bone_matrices[bone_idx]
+                    if bone_idx in bone_matrices_flat:
+                        # Get flattened bone transform
+                        # (px, py, pz, r00, r01, r02, r10, r11, r12, r20, r21, r22)
+                        m = bone_matrices_flat[bone_idx]
                         
-                        # Transform: rotate offset by bone matrix, then add bone position
-                        # We still need Vector for matrix multiplication, but we accumulate scalars
-                        v = bone_world_rot @ Vector_cls(weight.offset)
+                        # Rotate offset
+                        rx = m[3]*off_x + m[4]*off_y + m[5]*off_z
+                        ry = m[6]*off_x + m[7]*off_y + m[8]*off_z
+                        rz = m[9]*off_x + m[10]*off_y + m[11]*off_z
 
-                        pos_x += (v.x + bone_world_pos.x) * w
-                        pos_y += (v.y + bone_world_pos.y) * w
-                        pos_z += (v.z + bone_world_pos.z) * w
+                        # Add to world position and accumulate
+                        pos_x += (rx + m[0]) * w
+                        pos_y += (ry + m[1]) * w
+                        pos_z += (rz + m[2]) * w
                         
                     elif bone_idx in bone_positions:
                         # Fallback: just position (no rotation)
                         bone_pos_tuple = bone_positions[bone_idx]
-                        off_x, off_y, off_z = weight.offset
 
                         pos_x += (bone_pos_tuple[0] + off_x) * w
                         pos_y += (bone_pos_tuple[1] + off_y) * w
                         pos_z += (bone_pos_tuple[2] + off_z) * w
                     else:
                         # Last fallback: just use weight offset
-                        off_x, off_y, off_z = weight.offset
                         pos_x += off_x * w
                         pos_y += off_y * w
                         pos_z += off_z * w
