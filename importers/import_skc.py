@@ -244,49 +244,77 @@ class SKCImporter:
             rot_y_list = [0.0] * (num_frames * 2)
             rot_z_list = [0.0] * (num_frames * 2)
 
+            # Optimization: Pre-calculate rest components
+            rest_pos = rest_local.to_translation()
+            rest_quat = rest_local.to_quaternion()
+            rest_quat_inv = rest_quat.inverted()
+
+            channel_data = self.animation.channel_data
+
             for frame_idx in frame_indices:
-                target_pos = rest_local.to_translation()
-                target_quat = rest_local.to_quaternion()
-                
+                # 1. Calculate Target Position
                 if pos_idx is not None:
-                    raw_pos = self.animation.channel_data[frame_idx][pos_idx].as_position
-                    target_pos = self._transform_pos(raw_pos)
+                    # Inline as_position and _transform_pos for speed
+                    d = channel_data[frame_idx][pos_idx].data
+                    x, y, z = d[0], d[1], d[2]
                     
+                    if self.swap_yz:
+                         t_x = x * self.scale
+                         t_y = -z * self.scale
+                         t_z = y * self.scale
+                    else:
+                         t_x = x * self.scale
+                         t_y = y * self.scale
+                         t_z = z * self.scale
+                else:
+                    t_x, t_y, t_z = rest_pos.x, rest_pos.y, rest_pos.z
+
+                # 2. Calculate Target Rotation
                 if rot_idx is not None:
-                    raw_quat = self.animation.channel_data[frame_idx][rot_idx].as_quaternion
-                    target_quat = self._transform_quat(raw_quat)
+                    # Inline as_quaternion and _transform_quat
+                    d = channel_data[frame_idx][rot_idx].data
+                    qx, qy, qz, qw = d[0], d[1], d[2], d[3]
                     
-                target_matrix = target_quat.to_matrix().to_4x4()
-                target_matrix.translation = target_pos
-                
-                delta_matrix = rest_local_inv @ target_matrix
-                
-                loc = delta_matrix.to_translation()
-                rot = delta_matrix.to_quaternion()
+                    if self.swap_yz:
+                        target_quat = Quaternion((qw, qx, -qz, qy))
+                    else:
+                        target_quat = Quaternion((qw, qx, qy, qz))
+                else:
+                    target_quat = rest_quat
 
+                # 3. Calculate Delta Rotation (Q_delta = Q_rest_inv @ Q_target)
+                rot = rest_quat_inv @ target_quat
+
+                # 4. Calculate Delta Location (L_delta = Q_rest_inv @ (T_target - T_rest))
+                dt_x = t_x - rest_pos.x
+                dt_y = t_y - rest_pos.y
+                dt_z = t_z - rest_pos.z
+                
+                loc = rest_quat_inv @ Vector((dt_x, dt_y, dt_z))
+                
                 # Fill lists
-                # idx * 2 is frame, idx * 2 + 1 is value
                 idx_base = frame_idx * 2
+                f_idx = float(frame_idx)
 
-                loc_x_list[idx_base] = float(frame_idx)
+                loc_x_list[idx_base] = f_idx
                 loc_x_list[idx_base+1] = loc.x
 
-                loc_y_list[idx_base] = float(frame_idx)
+                loc_y_list[idx_base] = f_idx
                 loc_y_list[idx_base+1] = loc.y
                 
-                loc_z_list[idx_base] = float(frame_idx)
+                loc_z_list[idx_base] = f_idx
                 loc_z_list[idx_base+1] = loc.z
 
-                rot_w_list[idx_base] = float(frame_idx)
+                rot_w_list[idx_base] = f_idx
                 rot_w_list[idx_base+1] = rot.w
 
-                rot_x_list[idx_base] = float(frame_idx)
+                rot_x_list[idx_base] = f_idx
                 rot_x_list[idx_base+1] = rot.x
 
-                rot_y_list[idx_base] = float(frame_idx)
+                rot_y_list[idx_base] = f_idx
                 rot_y_list[idx_base+1] = rot.y
 
-                rot_z_list[idx_base] = float(frame_idx)
+                rot_z_list[idx_base] = f_idx
                 rot_z_list[idx_base+1] = rot.z
 
             # Create F-Curves and assign data
