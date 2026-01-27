@@ -159,16 +159,23 @@ def apply_skc_rest_pose(skd_model, skc_animation, scale=1.0):
         else:
             shifts[name] = Vector((0,0,0))
 
+    # Optimization: Pre-calculate shifts list for O(1) access by bone index
+    # instead of repeated dictionary lookups inside the tight vertex/weight loop.
+    num_bones = len(skd_model.bones)
+    shifts_list = [Vector((0,0,0))] * num_bones
+    for i, bone in enumerate(skd_model.bones):
+        shifts_list[i] = shifts.get(bone.name, Vector((0,0,0)))
+
     # Apply to Mesh
     for surf in skd_model.surfaces:
         for vert in surf.vertices:
             for w in vert.weights:
-                bone_name = skd_model.bones[w.bone_index].name
-                shift = shifts.get(bone_name, Vector((0,0,0)))
-                
-                cur_offset = Vector(w.offset) * scale
-                new_offset = cur_offset - shift
-                w.offset = (new_offset.x / scale, new_offset.y / scale, new_offset.z / scale)
+                if w.bone_index < num_bones:
+                    shift = shifts_list[w.bone_index]
+
+                    cur_offset = Vector(w.offset) * scale
+                    new_offset = cur_offset - shift
+                    w.offset = (new_offset.x / scale, new_offset.y / scale, new_offset.z / scale)
 
     # 5. Update SKD Bone Offsets (Virtual Offsets)
     # As discussed: New_Offset = New_World - Parent_New_World.
