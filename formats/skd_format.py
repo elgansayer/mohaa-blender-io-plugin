@@ -177,7 +177,7 @@ SKD_TRIANGLE_SIZE = 12
 # Data Classes
 # =============================================================================
 
-@dataclass
+@dataclass(slots=True)
 class SKDHeader:
     """SKD file header"""
     ident: int
@@ -273,7 +273,7 @@ class SKDHeader:
         f.write(data)
 
 
-@dataclass
+@dataclass(slots=True)
 class SKDSurface:
     """SKD surface (mesh group)"""
     ident: int
@@ -320,7 +320,7 @@ class SKDSurface:
         f.write(data)
 
 
-@dataclass
+@dataclass(slots=True)
 class SKDWeight:
     """Bone weight for a vertex"""
     bone_index: int
@@ -348,7 +348,7 @@ class SKDWeight:
         f.write(data)
 
 
-@dataclass
+@dataclass(slots=True)
 class SKDMorph:
     """Morph target offset for a vertex"""
     morph_index: int
@@ -374,7 +374,7 @@ class SKDMorph:
         f.write(data)
 
 
-@dataclass
+@dataclass(slots=True)
 class SKDVertex:
     """SKD vertex with weights and morphs"""
     normal: Tuple[float, float, float]
@@ -502,7 +502,7 @@ class SKDVertex:
         return tuple(pos)
 
 
-@dataclass
+@dataclass(slots=True)
 class SKDBoneFileData:
     """Bone data from file (boneFileData_t)"""
     name: str
@@ -568,7 +568,7 @@ class SKDBoneFileData:
         return bone
 
 
-@dataclass 
+@dataclass(slots=True)
 class SKDBoneName:
     """Simple bone name structure (for older SKB format)"""
     parent: int
@@ -589,7 +589,7 @@ class SKDBoneName:
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class SKDTriangle:
     """Triangle face indices"""
     indices: Tuple[int, int, int]
@@ -607,7 +607,7 @@ class SKDTriangle:
         f.write(data)
 
 
-@dataclass
+@dataclass(slots=True)
 class SKDModel:
     """Complete SKD model data"""
     header: SKDHeader
@@ -646,9 +646,15 @@ class SKDModel:
             
             # Read triangles
             f.seek(surface_start + surface_header.ofs_triangles)
-            triangles = []
-            for _ in range(surface_header.num_triangles):
-                triangles.append(SKDTriangle.read(f))
+
+            # Optimization: Bulk read triangles
+            bytes_to_read = surface_header.num_triangles * SKD_TRIANGLE_SIZE
+            tri_data = f.read(bytes_to_read)
+
+            triangles = [
+                SKDTriangle(indices=t)
+                for t in struct.iter_unpack(SKD_TRIANGLE_FORMAT, tri_data)
+            ]
             
             # Read vertices
             f.seek(surface_start + surface_header.ofs_verts)
@@ -722,7 +728,7 @@ class SKDModel:
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class SKDSurfaceData:
     """Complete surface data including geometry"""
     header: SKDSurface

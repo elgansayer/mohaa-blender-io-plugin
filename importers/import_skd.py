@@ -84,6 +84,11 @@ class SKDImporter:
         except Exception as e:
             print(f"Error loading SKD file: {e}")
             return None, None
+
+        # Apply header scale (V6+)
+        if self.model.header.version >= 6 and abs(self.model.header.scale - 1.0) > 0.0001:
+            print(f"Applying SKD V6 scale: {self.model.header.scale}")
+            self.scale *= self.model.header.scale
         
         # Get model name from file
         model_name = os.path.splitext(os.path.basename(self.filepath))[0]

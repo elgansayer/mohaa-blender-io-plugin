@@ -105,7 +105,7 @@ SKC_CHANNEL_NAME_FORMAT = '<32s'
 # Data Classes
 # =============================================================================
 
-@dataclass
+@dataclass(slots=True)
 class SKCHeader:
     """SKC animation file header"""
     ident: int
@@ -170,7 +170,7 @@ class SKCHeader:
         return bool(self.flags & TAF_HASUPPER)
 
 
-@dataclass
+@dataclass(slots=True)
 class SKCFrame:
     """Animation frame data"""
     bounds_min: Tuple[float, float, float]
@@ -208,7 +208,7 @@ class SKCFrame:
         f.write(data)
 
 
-@dataclass
+@dataclass(slots=True)
 class SKCChannel:
     """Animation channel (bone transform component)"""
     name: str
@@ -221,7 +221,7 @@ class SKCChannel:
         return cls(name=name, channel_type=channel_type)
 
 
-@dataclass
+@dataclass(slots=True)
 class SKCChannelFrame:
     """Channel data for a single frame"""
     data: Tuple[float, ...]  # 4 floats for rotation, 3 for position, 1 for value
@@ -256,7 +256,7 @@ class SKCChannelFrame:
         return self.data[0]
 
 
-@dataclass
+@dataclass(slots=True)
 class SKCAnimation:
     """Complete SKC animation data"""
     header: SKCHeader
@@ -291,13 +291,15 @@ class SKCAnimation:
             # Format: [ident:4][version:4][filename:64][...rest of header]
             header = cls._read_old_header(f, ident, version)
             header_size = 8 + 64 + 40  # ident+ver + filename + rest of old header
-        elif version in (13, 14):
+        elif version >= 13:
             # New format: standard header
             f.seek(0)
             header = SKCHeader.read(f)
             header_size = SKC_HEADER_SIZE
+            if version > SKC_VERSION_CURRENT:
+                print(f"Warning: SKC version {version} is newer than supported {SKC_VERSION_CURRENT}, attempting to parse as Standard")
         else:
-            # Unknown version - try old format first, then new
+            # Unknown low version - try old format first, then new
             print(f"Warning: Unknown SKC version {version}, attempting to parse")
             f.seek(0)
             header = SKCHeader.read(f)
@@ -323,28 +325,28 @@ class SKCAnimation:
         
         # Read channel data for each frame
         channel_data_start = header_size + (header.num_frames * SKC_FRAME_SIZE)
-        
-        channel_data = []
-        for frame_idx, frame in enumerate(frames):
-            frame_channels = []
-            frame_channel_offset = channel_data_start + (frame_idx * header.num_channels * SKC_CHANNEL_DATA_SIZE)
-            f.seek(frame_channel_offset)
-            
-            # Bulk read optimization: Read all channel data for this frame at once
-            bytes_to_read = header.num_channels * SKC_CHANNEL_DATA_SIZE
-            frame_data_block = f.read(bytes_to_read)
+        f.seek(channel_data_start)
 
-            # Use iter_unpack for efficient unpacking
-            # frame_channels = [SKCChannelFrame(data=t) for t in struct.iter_unpack(SKC_CHANNEL_DATA_FORMAT, frame_data_block)]
+        # Bulk read optimization: Read ALL channel data at once
+        # Format is Frame 0 [Chan 0, Chan 1...], Frame 1 [Chan 0...]
+        total_channel_bytes = header.num_frames * header.num_channels * SKC_CHANNEL_DATA_SIZE
+        all_channel_data = f.read(total_channel_bytes)
 
-            # Since we need to construct the list anyway, list comprehension is fast
-            # We use struct.iter_unpack available in Python 3.4+
-            frame_channels = [
-                SKCChannelFrame(data=unpacked_data)
-                for unpacked_data in struct.iter_unpack(SKC_CHANNEL_DATA_FORMAT, frame_data_block)
-            ]
-            
-            channel_data.append(frame_channels)
+        if len(all_channel_data) < total_channel_bytes:
+             print(f"Warning: Unexpected end of file. Expected {total_channel_bytes} bytes for channel data, got {len(all_channel_data)}")
+
+        # Create iterator for all frames and channels
+        channel_iter = struct.iter_unpack(SKC_CHANNEL_DATA_FORMAT, all_channel_data)
+
+        # Create all SKCChannelFrame objects in one go
+        all_frames_flat = [SKCChannelFrame(data=t) for t in channel_iter]
+
+        # Slice into per-frame lists
+        num_ch = header.num_channels
+        channel_data = [
+            all_frames_flat[i : i + num_ch]
+            for i in range(0, len(all_frames_flat), num_ch)
+        ]
         
         return cls(
             header=header,
