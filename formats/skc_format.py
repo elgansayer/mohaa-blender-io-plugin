@@ -105,7 +105,7 @@ SKC_CHANNEL_NAME_FORMAT = '<32s'
 # Data Classes
 # =============================================================================
 
-@dataclass
+@dataclass(slots=True)
 class SKCHeader:
     """SKC animation file header"""
     ident: int
@@ -170,7 +170,7 @@ class SKCHeader:
         return bool(self.flags & TAF_HASUPPER)
 
 
-@dataclass
+@dataclass(slots=True)
 class SKCFrame:
     """Animation frame data"""
     bounds_min: Tuple[float, float, float]
@@ -208,7 +208,7 @@ class SKCFrame:
         f.write(data)
 
 
-@dataclass
+@dataclass(slots=True)
 class SKCChannel:
     """Animation channel (bone transform component)"""
     name: str
@@ -221,7 +221,7 @@ class SKCChannel:
         return cls(name=name, channel_type=channel_type)
 
 
-@dataclass
+@dataclass(slots=True)
 class SKCChannelFrame:
     """Channel data for a single frame"""
     data: Tuple[float, ...]  # 4 floats for rotation, 3 for position, 1 for value
@@ -256,7 +256,7 @@ class SKCChannelFrame:
         return self.data[0]
 
 
-@dataclass
+@dataclass(slots=True)
 class SKCAnimation:
     """Complete SKC animation data"""
     header: SKCHeader
