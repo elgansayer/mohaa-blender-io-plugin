@@ -177,7 +177,7 @@ SKD_TRIANGLE_SIZE = 12
 # Data Classes
 # =============================================================================
 
-@dataclass
+@dataclass(slots=True)
 class SKDHeader:
     """SKD file header"""
     ident: int
@@ -267,13 +267,12 @@ class SKDHeader:
                 self.num_surfaces, self.num_bones,
                 self.ofs_bones, self.ofs_surfaces, self.ofs_end,
                 *self.lod_index,
-                self.num_boxes, self.ofs_boxes,
-                self.num_morph_targets, self.ofs_morph_targets
+                self.num_boxes, self.ofs_boxes
             )
         f.write(data)
 
 
-@dataclass
+@dataclass(slots=True)
 class SKDSurface:
     """SKD surface (mesh group)"""
     ident: int
@@ -320,7 +319,7 @@ class SKDSurface:
         f.write(data)
 
 
-@dataclass
+@dataclass(slots=True)
 class SKDWeight:
     """Bone weight for a vertex"""
     bone_index: int
@@ -348,7 +347,7 @@ class SKDWeight:
         f.write(data)
 
 
-@dataclass
+@dataclass(slots=True)
 class SKDMorph:
     """Morph target offset for a vertex"""
     morph_index: int
@@ -374,7 +373,7 @@ class SKDMorph:
         f.write(data)
 
 
-@dataclass
+@dataclass(slots=True)
 class SKDVertex:
     """SKD vertex with weights and morphs"""
     normal: Tuple[float, float, float]
@@ -439,24 +438,25 @@ class SKDVertex:
             num_weights = unpacked[5]
             num_morphs = unpacked[6]
 
-            morphs = []
-            for _ in range(num_morphs):
+            # Inlining loops for morphs and weights to reduce overhead
+            morphs = [None] * num_morphs
+            for i in range(num_morphs):
                 m_unpacked = unpack_morph(buf, offset)
                 offset += SKD_MORPH_SIZE
-                morphs.append(SKDMorph(
+                morphs[i] = SKDMorph(
                     morph_index=m_unpacked[0],
                     offset=(m_unpacked[1], m_unpacked[2], m_unpacked[3])
-                ))
+                )
 
-            weights = []
-            for _ in range(num_weights):
+            weights = [None] * num_weights
+            for i in range(num_weights):
                 w_unpacked = unpack_weight(buf, offset)
                 offset += SKD_WEIGHT_SIZE
-                weights.append(SKDWeight(
+                weights[i] = SKDWeight(
                     bone_index=w_unpacked[0],
                     bone_weight=w_unpacked[1],
                     offset=(w_unpacked[2], w_unpacked[3], w_unpacked[4])
-                ))
+                )
 
             vertices.append(cls(
                 normal=normal,
@@ -502,7 +502,7 @@ class SKDVertex:
         return tuple(pos)
 
 
-@dataclass
+@dataclass(slots=True)
 class SKDBoneFileData:
     """Bone data from file (boneFileData_t)"""
     name: str
@@ -568,7 +568,7 @@ class SKDBoneFileData:
         return bone
 
 
-@dataclass 
+@dataclass(slots=True)
 class SKDBoneName:
     """Simple bone name structure (for older SKB format)"""
     parent: int
@@ -589,7 +589,7 @@ class SKDBoneName:
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class SKDTriangle:
     """Triangle face indices"""
     indices: Tuple[int, int, int]
@@ -607,7 +607,7 @@ class SKDTriangle:
         f.write(data)
 
 
-@dataclass
+@dataclass(slots=True)
 class SKDModel:
     """Complete SKD model data"""
     header: SKDHeader
@@ -722,7 +722,7 @@ class SKDModel:
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class SKDSurfaceData:
     """Complete surface data including geometry"""
     header: SKDSurface

@@ -241,9 +241,15 @@ class SKDImporter:
             world_rot = parent_rot @ local_rot
             world_pos = parent_pos + parent_rot @ local_pos
             
-            # Store matrices (as Vector and Matrix)
-            self.bone_world_matrices[bone_idx] = (world_pos.copy(), world_rot.copy())
-            # Also store position tuple for backward compatibility
+            # Store flattened matrices for performance (px, py, pz, r00, r01, r02, ...)
+            # Avoids Matrix/Vector overhead in vertex loop
+            self.bone_world_matrices[bone_idx] = (
+                world_pos.x, world_pos.y, world_pos.z,
+                world_rot[0][0], world_rot[0][1], world_rot[0][2],
+                world_rot[1][0], world_rot[1][1], world_rot[1][2],
+                world_rot[2][0], world_rot[2][1], world_rot[2][2]
+            )
+            # Also store position tuple for backward compatibility and armature creation
             self.bone_world_positions[bone_idx] = tuple(world_pos)
             
             # Find children and recurse
@@ -478,7 +484,6 @@ class SKDImporter:
         bone_positions = self.bone_world_positions
         scale = self.scale
         swap_yz = self.swap_yz
-        Vector_cls = Vector
 
         vertex_offset = 0
         
@@ -487,7 +492,7 @@ class SKDImporter:
             for vertex in surface.vertices:
                 # Calculate position using bone matrices
                 # Formula: vertex = sum((bone_rotation @ weight_offset + bone_position) * weight)
-                # Optimized to avoid Vector accumulation and intermediate tuples
+                # Optimized to completely avoid Vector/Matrix instantiation in loop
 
                 pos_x = 0.0
                 pos_y = 0.0
@@ -496,33 +501,37 @@ class SKDImporter:
                 for weight in vertex.weights:
                     bone_idx = weight.bone_index
                     w = weight.bone_weight
+                    ox, oy, oz = weight.offset
 
                     if bone_idx in bone_matrices:
-                        # Get bone world transform
-                        bone_world_pos, bone_world_rot = bone_matrices[bone_idx]
+                        # Get flattened bone world transform
+                        (px, py, pz,
+                         r00, r01, r02,
+                         r10, r11, r12,
+                         r20, r21, r22) = bone_matrices[bone_idx]
                         
-                        # Transform: rotate offset by bone matrix, then add bone position
-                        # We still need Vector for matrix multiplication, but we accumulate scalars
-                        v = bone_world_rot @ Vector_cls(weight.offset)
+                        # Manual Matrix @ Vector multiplication
+                        vx = r00*ox + r01*oy + r02*oz
+                        vy = r10*ox + r11*oy + r12*oz
+                        vz = r20*ox + r21*oy + r22*oz
 
-                        pos_x += (v.x + bone_world_pos.x) * w
-                        pos_y += (v.y + bone_world_pos.y) * w
-                        pos_z += (v.z + bone_world_pos.z) * w
+                        # Translate and accumulate
+                        pos_x += (vx + px) * w
+                        pos_y += (vy + py) * w
+                        pos_z += (vz + pz) * w
                         
                     elif bone_idx in bone_positions:
                         # Fallback: just position (no rotation)
                         bone_pos_tuple = bone_positions[bone_idx]
-                        off_x, off_y, off_z = weight.offset
 
-                        pos_x += (bone_pos_tuple[0] + off_x) * w
-                        pos_y += (bone_pos_tuple[1] + off_y) * w
-                        pos_z += (bone_pos_tuple[2] + off_z) * w
+                        pos_x += (bone_pos_tuple[0] + ox) * w
+                        pos_y += (bone_pos_tuple[1] + oy) * w
+                        pos_z += (bone_pos_tuple[2] + oz) * w
                     else:
                         # Last fallback: just use weight offset
-                        off_x, off_y, off_z = weight.offset
-                        pos_x += off_x * w
-                        pos_y += off_y * w
-                        pos_z += off_z * w
+                        pos_x += ox * w
+                        pos_y += oy * w
+                        pos_z += oz * w
 
                 # Inline transform (matches _transform_position logic)
                 # MoHAA: Y-forward, Z-up -> Blender: Y-back, Z-up
