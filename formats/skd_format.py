@@ -646,9 +646,11 @@ class SKDModel:
             
             # Read triangles
             f.seek(surface_start + surface_header.ofs_triangles)
-            triangles = []
-            for _ in range(surface_header.num_triangles):
-                triangles.append(SKDTriangle.read(f))
+            triangle_data = f.read(surface_header.num_triangles * SKD_TRIANGLE_SIZE)
+            triangles = [
+                SKDTriangle(indices=t)
+                for t in struct.iter_unpack(SKD_TRIANGLE_FORMAT, triangle_data)
+            ]
             
             # Read vertices
             f.seek(surface_start + surface_header.ofs_verts)
