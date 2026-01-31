@@ -24,9 +24,10 @@ from ..formats.skd_format import (
     SKDModel, SKDHeader, SKDSurface, SKDSurfaceData,
     SKDVertex, SKDWeight, SKDMorph, SKDBoneFileData, SKDTriangle,
     SKD_IDENT_INT, SKD_VERSION_CURRENT, SKD_VERSION_OLD, SKELBONE_POSROT,
-    SKD_HEADER_V6_SIZE, SKD_SURFACE_SIZE, SKD_VERTEX_SIZE,
+    SKD_HEADER_V6_SIZE, SKD_HEADER_V5_SIZE, SKD_SURFACE_SIZE, SKD_VERTEX_SIZE,
     SKD_WEIGHT_SIZE, SKD_MORPH_SIZE, SKD_TRIANGLE_SIZE,
-    SKD_BONE_NAME_SIZE, SKD_BONE_FILE_DATA_BASE_SIZE
+    SKD_BONE_NAME_SIZE, SKD_BONE_FILE_DATA_BASE_SIZE,
+    SKD_HEADER_V6_FORMAT, SKD_HEADER_V5_FORMAT
 )
 
 
@@ -38,7 +39,8 @@ class SKDExporter:
                  armature_obj: Optional[bpy.types.Object] = None,
                  flip_uvs: bool = True,
                  swap_yz: bool = False,
-                 scale: float = 1.0):
+                 scale: float = 1.0,
+                 version: int = SKD_VERSION_CURRENT):
         """
         Initialize exporter.
         
@@ -49,6 +51,7 @@ class SKDExporter:
             flip_uvs: Flip V coordinate (reverse of import)
             swap_yz: Swap Y and Z axes (reverse of import)
             scale: Global scale factor (inverse applied)
+            version: SKD version (default: 6)
         """
         self.filepath = filepath
         self.mesh_obj = mesh_obj
@@ -56,6 +59,7 @@ class SKDExporter:
         self.flip_uvs = flip_uvs
         self.swap_yz = swap_yz
         self.scale = scale
+        self.version = version
         
         self.bone_indices: Dict[str, int] = {}  # Bone name -> index
     
@@ -298,202 +302,161 @@ class SKDExporter:
         model_name = os.path.splitext(os.path.basename(self.filepath))[0]
         
         # Calculate sizes and offsets
-        header_size = SKD_HEADER_V6_SIZE  # 144 bytes
+        if self.version >= SKD_VERSION_CURRENT:
+            header_size = SKD_HEADER_V6_SIZE
+        else:
+            header_size = SKD_HEADER_V5_SIZE
         
-        # Calculate bone data size (using boneFileData_t format: 84 bytes base + 12 bytes offset)
+        # Calculate bone data size
         bone_data_size = len(bones) * (SKD_BONE_FILE_DATA_BASE_SIZE + 12)
         
-        # Calculate surface data size
-        surface_data_size = 0
-        surface_infos = []
+        # --- Pre-build Surface Binary Data ---
+        surfaces_binary = []
         
         for surface in surfaces:
-            num_verts = len(surface['vertices'])
-            num_tris = len(surface['triangles'])
+            # 1. Build Triangles
+            tri_list = []
+            tri_struct = struct.Struct('<3i')
+            for tri in surface['triangles']:
+                tri_list.append(tri_struct.pack(tri[0], tri[1], tri[2]))
+            tri_data = b''.join(tri_list)
             
-            # Surface header: 84 bytes
-            surf_header_size = SKD_SURFACE_SIZE
+            # 2. Build Vertices
+            vert_list = []
+            vert_header_struct = struct.Struct('<3f 2f i i')
+            morph_struct = struct.Struct('<i 3f')
+            weight_struct = struct.Struct('<i f 3f')
             
-            # Triangles: 12 bytes each (3 ints)
-            tris_size = num_tris * SKD_TRIANGLE_SIZE
-            
-            # Vertices: variable size
-            # Each vertex: 24 bytes header + morphs + weights
-            verts_size = 0
             for vert in surface['vertices']:
-                verts_size += SKD_VERTEX_SIZE  # 24 bytes
-                verts_size += len(vert['morphs']) * SKD_MORPH_SIZE  # 16 bytes each
-                verts_size += len(vert['weights']) * SKD_WEIGHT_SIZE  # 20 bytes each
-            
-            # Collapse map: 4 bytes per vertex (int)
-            collapse_size = num_verts * 4
-            
-            # Collapse index: 4 bytes per vertex (int)  
-            collapse_idx_size = num_verts * 4
-            
-            total_surf_size = surf_header_size + tris_size + verts_size + collapse_size + collapse_idx_size
-            
-            surface_infos.append({
-                'name': surface['name'],
-                'vertices': surface['vertices'],
-                'triangles': surface['triangles'],
-                'header_size': surf_header_size,
-                'tris_offset': surf_header_size,
-                'tris_size': tris_size,
-                'verts_offset': surf_header_size + tris_size,
-                'verts_size': verts_size,
-                'collapse_offset': surf_header_size + tris_size + verts_size,
-                'collapse_size': collapse_size,
-                'collapse_idx_offset': surf_header_size + tris_size + verts_size + collapse_size,
-                'total_size': total_surf_size
-            })
-            
-            surface_data_size += total_surf_size
-        
-        # Calculate offsets
-        ofs_surfaces = header_size
-        ofs_bones = header_size + surface_data_size
-        ofs_end = ofs_bones + bone_data_size
-        
-        # Build binary data
-        output = BytesIO()
-        
-        # Write header
-        header_data = struct.pack(
-            '<i i 64s i i i i i 10i i i i i f',
-            SKD_IDENT_INT,  # ident
-            SKD_VERSION_CURRENT,  # version (6)
-            model_name.encode('latin-1').ljust(64, b'\x00'),  # name
-            len(surfaces),  # numSurfaces
-            len(bones),  # numBones
-            ofs_bones,  # ofsBones
-            ofs_surfaces,  # ofsSurfaces
-            ofs_end,  # ofsEnd
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0,  # lodIndex[10]
-            0,  # numBoxes
-            0,  # ofsBoxes
-            0,  # numMorphTargets
-            0,  # ofsMorphTargets
-            1.0 / self.scale if self.scale != 0 else 1.0  # scale
-        )
-        output.write(header_data)
-        
-        # Write surfaces
-        for i, surf_info in enumerate(surface_infos):
-            surf_start = output.tell()
-            
-            num_verts = len(surf_info['vertices'])
-            num_tris = len(surf_info['triangles'])
-            
-            # Calculate offsets relative to surface start
-            ofs_triangles = surf_info['tris_offset']
-            ofs_verts = surf_info['verts_offset']
-            ofs_collapse = surf_info['collapse_offset']
-            ofs_end = surf_info['total_size']
-            ofs_collapse_idx = surf_info['collapse_idx_offset']
-            
-            # Write surface header (84 bytes)
-            surf_header = struct.pack(
-                '<i 64s i i i i i i i i',
-                0,  # ident
-                surf_info['name'].encode('latin-1')[:64].ljust(64, b'\x00'),  # name
-                num_tris,  # numTriangles
-                num_verts,  # numVerts
-                0,  # staticSurfProcessed
-                ofs_triangles,  # ofsTriangles
-                ofs_verts,  # ofsVerts
-                ofs_collapse,  # ofsCollapse
-                ofs_end,  # ofsEnd
-                ofs_collapse_idx  # ofsCollapseIndex
-            )
-            output.write(surf_header)
-            
-            # Write triangles (3 ints each = 12 bytes)
-            for tri in surf_info['triangles']:
-                output.write(struct.pack('<3i', tri[0], tri[1], tri[2]))
-            
-            # Write vertices
-            for vert in surf_info['vertices']:
-                # Vertex header (24 bytes)
+                morphs = vert['morphs']
+                # If V5, skip morphs
+                if self.version < SKD_VERSION_CURRENT:
+                    morphs = []
+
                 num_weights = len(vert['weights'])
-                num_morphs = len(vert['morphs'])
+                num_morphs = len(morphs)
                 
-                vert_data = struct.pack(
-                    '<3f 2f i i',
+                # Header
+                vert_list.append(vert_header_struct.pack(
                     vert['normal'][0], vert['normal'][1], vert['normal'][2],
                     vert['tex_coords'][0], vert['tex_coords'][1],
                     num_weights,
                     num_morphs
-                )
-                output.write(vert_data)
+                ))
                 
-                # Write morphs (16 bytes each)
-                for morph in vert['morphs']:
-                    morph_data = struct.pack(
-                        '<i 3f',
+                # Morphs
+                for morph in morphs:
+                    vert_list.append(morph_struct.pack(
                         morph['morph_index'],
                         morph['offset'][0], morph['offset'][1], morph['offset'][2]
-                    )
-                    output.write(morph_data)
+                    ))
                 
-                # Write weights (20 bytes each)
+                # Weights
                 for weight in vert['weights']:
-                    weight_data = struct.pack(
-                        '<i f 3f',
+                    vert_list.append(weight_struct.pack(
                         weight['bone_index'],
                         weight['bone_weight'],
                         weight['offset'][0], weight['offset'][1], weight['offset'][2]
-                    )
-                    output.write(weight_data)
+                    ))
+
+            vert_data = b''.join(vert_list)
+
+            # 3. Build Collapse Maps (identity for now)
+            num_verts = len(surface['vertices'])
+            collapse_struct = struct.Struct('<i')
+            # Fast pack for range
+            collapse_data = b''.join([collapse_struct.pack(v) for v in range(num_verts)])
+            collapse_idx_data = collapse_data # Same identity map
+
+            # Calculate Offsets
+            tris_size = len(tri_data)
+            verts_size = len(vert_data)
+            collapse_size = len(collapse_data)
+            collapse_idx_size = len(collapse_idx_data)
+
+            surf_header_size = SKD_SURFACE_SIZE
+
+            ofs_triangles = surf_header_size
+            ofs_verts = ofs_triangles + tris_size
+            ofs_collapse = ofs_verts + verts_size
+            ofs_end = ofs_collapse + collapse_size
+            ofs_collapse_idx = ofs_end
+
+            total_surf_size = ofs_end + collapse_idx_size
+
+            # 4. Build Surface Header
+            surf_header = struct.pack(
+                '<i 64s i i i i i i i i',
+                0,  # ident
+                surface['name'].encode('latin-1')[:64].ljust(64, b'\x00'),  # name
+                len(surface['triangles']),  # numTriangles
+                num_verts,  # numVerts
+                0,  # staticSurfProcessed
+                ofs_triangles,
+                ofs_verts,
+                ofs_collapse,
+                total_surf_size,  # ofsEnd points to end of this block
+                ofs_collapse_idx
+            )
             
-            # Write collapse map (identity for now)
-            for v in range(num_verts):
-                output.write(struct.pack('<i', v))
+            # Concatenate all parts
+            surfaces_binary.append(surf_header + tri_data + vert_data + collapse_data + collapse_idx_data)
             
-            # Write collapse index (identity for now)
-            for v in range(num_verts):
-                output.write(struct.pack('<i', v))
+        # Calculate global offsets
+        surface_data_total_size = sum(len(b) for b in surfaces_binary)
+
+        ofs_surfaces = header_size
+        ofs_bones = header_size + surface_data_total_size
+        ofs_end = ofs_bones + bone_data_size
         
-        # Write bones (using boneFileData_t format: 84 bytes each)
+        # --- Build Bone Binary Data ---
+        bones_binary_list = []
         for bone_name, parent_name, offset in bones:
-            # We don't have separate base data or channel names, so offsets are 0
-            
             bone_data = struct.pack(
                 '<32s 32s i i i i i',
-                bone_name.encode('latin-1')[:32].ljust(32, b'\x00'),    # name
-                parent_name.encode('latin-1')[:32].ljust(32, b'\x00'),  # parent
-                SKELBONE_POSROT,  # boneType
-                84,  # ofsBaseData (point to immediate data?) 
-                     # Actually standard files have ofsBaseData=84 (relative to bone start)
-                     # if there is extra data. We just write the base struct. 
-                     # Wait, if we use SKELBONE_POSROT, do we need extra data?
-                     # Standard files usually have boneType 1 (POSROT) and no extra data?
-                     # Let's check phone_roundbase again. 
-                     # It had ofsBaseData: 84.
-                     # And boneType: 1.
-                     # If ofsBaseData is 84, it points to strictly AFTER the bone struct.
-                     # But ofsEnd is 116. So 116-84 = 32 bytes of extra data?
-                     # Let's look closer at phone_roundbase.
-                     # It had offsets: base=84, channels=96, names=116, end=116.
-                     # So base data at 84..96 (12 bytes). 
-                     # Channel names at 96..116 (20 bytes).
-                     # Bone names at 116..116 (0 bytes).
-                     # 12 bytes = 3 floats (offset).
-                     # So yes, POSROT has an offset.
-                     
-                0,   # ofsChannelNames (we skip for now)
-                0,   # ofsBoneNames
-                84 + 12  # ofsEnd (84 + 12 bytes for offset)
+                bone_name.encode('latin-1')[:32].ljust(32, b'\x00'),
+                parent_name.encode('latin-1')[:32].ljust(32, b'\x00'),
+                SKELBONE_POSROT,
+                84, # ofsBaseData (offset to base data relative to bone start)
+                0, 0,
+                84 + 12 # ofsEnd
             )
-            output.write(bone_data)
+            offset_data = struct.pack('<3f', offset[0], offset[1], offset[2])
+            bones_binary_list.append(bone_data + offset_data)
             
-            # Write the offset (12 bytes)
-            output.write(struct.pack('<3f', offset[0], offset[1], offset[2]))
-
+        bones_binary = b''.join(bones_binary_list)
         
-        # Write to file
+        # --- Write File ---
         with open(self.filepath, 'wb') as f:
-            f.write(output.getvalue())
+            # Write Header
+            if self.version >= SKD_VERSION_CURRENT:
+                header_data = struct.pack(
+                    SKD_HEADER_V6_FORMAT,
+                    SKD_IDENT_INT, self.version,
+                    model_name.encode('latin-1').ljust(64, b'\x00'),
+                    len(surfaces), len(bones),
+                    ofs_bones, ofs_surfaces, ofs_end,
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, # lodIndex
+                    0, 0, 0, 0, # boxes, morphs
+                    1.0 / self.scale if self.scale != 0 else 1.0
+                )
+            else:
+                header_data = struct.pack(
+                    SKD_HEADER_V5_FORMAT,
+                    SKD_IDENT_INT, self.version,
+                    model_name.encode('latin-1').ljust(64, b'\x00'),
+                    len(surfaces), len(bones),
+                    ofs_bones, ofs_surfaces, ofs_end,
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                    0, 0
+                )
+            f.write(header_data)
+
+            # Write Surfaces
+            f.write(b''.join(surfaces_binary))
+
+            # Write Bones
+            f.write(bones_binary)
 
 
 def export_skd(filepath: str,
@@ -501,7 +464,8 @@ def export_skd(filepath: str,
                armature_obj: Optional[bpy.types.Object] = None,
                flip_uvs: bool = True,
                swap_yz: bool = False,
-               scale: float = 1.0) -> bool:
+               scale: float = 1.0,
+               version: int = SKD_VERSION_CURRENT) -> bool:
     """
     Export mesh to SKD file.
     
@@ -512,9 +476,10 @@ def export_skd(filepath: str,
         flip_uvs: Flip V coordinate
         swap_yz: Swap Y and Z axes
         scale: Global scale factor
+        version: SKD version (default: 6)
         
     Returns:
         True on success
     """
-    exporter = SKDExporter(filepath, mesh_obj, armature_obj, flip_uvs, swap_yz, scale)
+    exporter = SKDExporter(filepath, mesh_obj, armature_obj, flip_uvs, swap_yz, scale, version)
     return exporter.execute()
