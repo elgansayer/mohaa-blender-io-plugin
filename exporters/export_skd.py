@@ -24,7 +24,7 @@ from ..formats.skd_format import (
     SKDModel, SKDHeader, SKDSurface, SKDSurfaceData,
     SKDVertex, SKDWeight, SKDMorph, SKDBoneFileData, SKDTriangle,
     SKD_IDENT_INT, SKD_VERSION_CURRENT, SKD_VERSION_OLD, SKELBONE_POSROT,
-    SKD_HEADER_V6_SIZE, SKD_SURFACE_SIZE, SKD_VERTEX_SIZE,
+    SKD_HEADER_V6_SIZE, SKD_HEADER_V5_SIZE, SKD_SURFACE_SIZE, SKD_VERTEX_SIZE,
     SKD_WEIGHT_SIZE, SKD_MORPH_SIZE, SKD_TRIANGLE_SIZE,
     SKD_BONE_NAME_SIZE, SKD_BONE_FILE_DATA_BASE_SIZE
 )
@@ -38,7 +38,8 @@ class SKDExporter:
                  armature_obj: Optional[bpy.types.Object] = None,
                  flip_uvs: bool = True,
                  swap_yz: bool = False,
-                 scale: float = 1.0):
+                 scale: float = 1.0,
+                 version: int = SKD_VERSION_CURRENT):
         """
         Initialize exporter.
         
@@ -49,6 +50,7 @@ class SKDExporter:
             flip_uvs: Flip V coordinate (reverse of import)
             swap_yz: Swap Y and Z axes (reverse of import)
             scale: Global scale factor (inverse applied)
+            version: SKD version (5 or 6)
         """
         self.filepath = filepath
         self.mesh_obj = mesh_obj
@@ -56,6 +58,7 @@ class SKDExporter:
         self.flip_uvs = flip_uvs
         self.swap_yz = swap_yz
         self.scale = scale
+        self.version = version
         
         self.bone_indices: Dict[str, int] = {}  # Bone name -> index
     
@@ -298,7 +301,10 @@ class SKDExporter:
         model_name = os.path.splitext(os.path.basename(self.filepath))[0]
         
         # Calculate sizes and offsets
-        header_size = SKD_HEADER_V6_SIZE  # 144 bytes
+        if self.version >= SKD_VERSION_CURRENT:
+            header_size = SKD_HEADER_V6_SIZE
+        else:
+            header_size = SKD_HEADER_V5_SIZE
         
         # Calculate bone data size (using boneFileData_t format: 84 bytes base + 12 bytes offset)
         bone_data_size = len(bones) * (SKD_BONE_FILE_DATA_BASE_SIZE + 12)
@@ -358,25 +364,25 @@ class SKDExporter:
         # Build binary data
         output = BytesIO()
         
-        # Write header
-        header_data = struct.pack(
-            '<i i 64s i i i i i 10i i i i i f',
-            SKD_IDENT_INT,  # ident
-            SKD_VERSION_CURRENT,  # version (6)
-            model_name.encode('latin-1').ljust(64, b'\x00'),  # name
-            len(surfaces),  # numSurfaces
-            len(bones),  # numBones
-            ofs_bones,  # ofsBones
-            ofs_surfaces,  # ofsSurfaces
-            ofs_end,  # ofsEnd
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0,  # lodIndex[10]
-            0,  # numBoxes
-            0,  # ofsBoxes
-            0,  # numMorphTargets
-            0,  # ofsMorphTargets
-            1.0 / self.scale if self.scale != 0 else 1.0  # scale
+        # Write header using SKDHeader class
+        # This handles version logic automatically
+        header = SKDHeader(
+            ident=SKD_IDENT_INT,
+            version=self.version,
+            name=model_name,
+            num_surfaces=len(surfaces),
+            num_bones=len(bones),
+            ofs_bones=ofs_bones,
+            ofs_surfaces=ofs_surfaces,
+            ofs_end=ofs_end,
+            lod_index=[0]*10,
+            num_boxes=0,
+            ofs_boxes=0,
+            num_morph_targets=0,
+            ofs_morph_targets=0,
+            scale=1.0 / self.scale if self.scale != 0 else 1.0
         )
-        output.write(header_data)
+        header.write(output)
         
         # Write surfaces
         for i, surf_info in enumerate(surface_infos):
@@ -501,7 +507,8 @@ def export_skd(filepath: str,
                armature_obj: Optional[bpy.types.Object] = None,
                flip_uvs: bool = True,
                swap_yz: bool = False,
-               scale: float = 1.0) -> bool:
+               scale: float = 1.0,
+               version: int = SKD_VERSION_CURRENT) -> bool:
     """
     Export mesh to SKD file.
     
@@ -512,9 +519,10 @@ def export_skd(filepath: str,
         flip_uvs: Flip V coordinate
         swap_yz: Swap Y and Z axes
         scale: Global scale factor
+        version: SKD version (5 or 6)
         
     Returns:
         True on success
     """
-    exporter = SKDExporter(filepath, mesh_obj, armature_obj, flip_uvs, swap_yz, scale)
+    exporter = SKDExporter(filepath, mesh_obj, armature_obj, flip_uvs, swap_yz, scale, version)
     return exporter.execute()
