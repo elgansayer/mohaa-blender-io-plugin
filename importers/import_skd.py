@@ -474,11 +474,23 @@ class SKDImporter:
         face_materials: List[int] = []  # Material index per face
         
         # Local cache for performance
-        bone_matrices = self.bone_world_matrices
-        bone_positions = self.bone_world_positions
         scale = self.scale
         swap_yz = self.swap_yz
-        Vector_cls = Vector
+
+        # Optimization: Flatten bone matrices for fast access without objects
+        # Format: bone_idx -> (pos_x, pos_y, pos_z, m00, m01, m02, m10, m11, m12, m20, m21, m22)
+        fast_bone_data = {}
+        for b_idx, (b_pos, b_rot) in self.bone_world_matrices.items():
+            # b_rot is 3x3 Matrix, b_pos is Vector
+            fast_bone_data[b_idx] = (
+                b_pos.x, b_pos.y, b_pos.z,
+                b_rot[0][0], b_rot[0][1], b_rot[0][2],
+                b_rot[1][0], b_rot[1][1], b_rot[1][2],
+                b_rot[2][0], b_rot[2][1], b_rot[2][2]
+            )
+
+        # Also cache raw positions for fallback
+        fast_bone_positions = self.bone_world_positions
 
         vertex_offset = 0
         
@@ -487,7 +499,6 @@ class SKDImporter:
             for vertex in surface.vertices:
                 # Calculate position using bone matrices
                 # Formula: vertex = sum((bone_rotation @ weight_offset + bone_position) * weight)
-                # Optimized to avoid Vector accumulation and intermediate tuples
 
                 pos_x = 0.0
                 pos_y = 0.0
@@ -497,29 +508,34 @@ class SKDImporter:
                     bone_idx = weight.bone_index
                     w = weight.bone_weight
 
-                    if bone_idx in bone_matrices:
-                        # Get bone world transform
-                        bone_world_pos, bone_world_rot = bone_matrices[bone_idx]
-                        
-                        # Transform: rotate offset by bone matrix, then add bone position
-                        # We still need Vector for matrix multiplication, but we accumulate scalars
-                        v = bone_world_rot @ Vector_cls(weight.offset)
+                    off_x, off_y, off_z = weight.offset
 
-                        pos_x += (v.x + bone_world_pos.x) * w
-                        pos_y += (v.y + bone_world_pos.y) * w
-                        pos_z += (v.z + bone_world_pos.z) * w
+                    if bone_idx in fast_bone_data:
+                        # Unpack optimized data
+                        # (bx, by, bz, r00, r01, r02, r10, r11, r12, r20, r21, r22) = fast_bone_data[bone_idx]
+                        # Tuple unpacking in loop can be slightly slow, accessing by index is faster if data is tuple
+                        bd = fast_bone_data[bone_idx]
                         
-                    elif bone_idx in bone_positions:
+                        # Rotate offset
+                        # rx = r00*ox + r01*oy + r02*oz
+                        rx = bd[3]*off_x + bd[4]*off_y + bd[5]*off_z
+                        ry = bd[6]*off_x + bd[7]*off_y + bd[8]*off_z
+                        rz = bd[9]*off_x + bd[10]*off_y + bd[11]*off_z
+
+                        # Add bone position and weight
+                        pos_x += (rx + bd[0]) * w
+                        pos_y += (ry + bd[1]) * w
+                        pos_z += (rz + bd[2]) * w
+                        
+                    elif bone_idx in fast_bone_positions:
                         # Fallback: just position (no rotation)
-                        bone_pos_tuple = bone_positions[bone_idx]
-                        off_x, off_y, off_z = weight.offset
+                        bone_pos_tuple = fast_bone_positions[bone_idx]
 
                         pos_x += (bone_pos_tuple[0] + off_x) * w
                         pos_y += (bone_pos_tuple[1] + off_y) * w
                         pos_z += (bone_pos_tuple[2] + off_z) * w
                     else:
                         # Last fallback: just use weight offset
-                        off_x, off_y, off_z = weight.offset
                         pos_x += off_x * w
                         pos_y += off_y * w
                         pos_z += off_z * w
