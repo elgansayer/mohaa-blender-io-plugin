@@ -267,8 +267,7 @@ class SKDHeader:
                 self.num_surfaces, self.num_bones,
                 self.ofs_bones, self.ofs_surfaces, self.ofs_end,
                 *self.lod_index,
-                self.num_boxes, self.ofs_boxes,
-                self.num_morph_targets, self.ofs_morph_targets
+                self.num_boxes, self.ofs_boxes
             )
         f.write(data)
 

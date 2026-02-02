@@ -25,7 +25,7 @@ bl_info = {
 }
 
 import bpy
-from bpy.props import StringProperty, BoolProperty, FloatProperty
+from bpy.props import StringProperty, BoolProperty, FloatProperty, EnumProperty
 from bpy.types import Operator, AddonPreferences
 from bpy_extras.io_utils import ImportHelper, ExportHelper
 import os
@@ -424,6 +424,16 @@ class EXPORT_OT_skd(Operator, ExportHelper):
         max=1000.0,
     )
     
+    version: EnumProperty(
+        name="Version",
+        description="SKD File Version",
+        items=[
+            ('6', "Version 6 (Standard)", "Supports morph targets and scaling"),
+            ('5', "Version 5 (Old)", "Older format, no morph targets"),
+        ],
+        default='6',
+    )
+
     def execute(self, context):
         from .exporters.export_skd import export_skd
         
@@ -448,6 +458,7 @@ class EXPORT_OT_skd(Operator, ExportHelper):
             flip_uvs=self.flip_uvs,
             swap_yz=self.swap_yz,
             scale=self.scale,
+            version=int(self.version)
         )
         
         if success:
@@ -468,6 +479,10 @@ class EXPORT_OT_skd(Operator, ExportHelper):
         box.prop(self, "scale")
         box.prop(self, "swap_yz")
         box.prop(self, "flip_uvs")
+
+        box = layout.box()
+        box.label(text="Format", icon='FILE')
+        box.prop(self, "version")
 
 
 class EXPORT_OT_skc(Operator, ExportHelper):
@@ -499,6 +514,16 @@ class EXPORT_OT_skc(Operator, ExportHelper):
         max=1000.0,
     )
     
+    version: EnumProperty(
+        name="Version",
+        description="SKC File Version",
+        items=[
+            ('14', "Version 14 (Standard)", "Standard animation format"),
+            ('13', "Version 13 (Old)", "Old animation format"),
+        ],
+        default='14',
+    )
+
     def execute(self, context):
         from .exporters.export_skc import export_skc
         
@@ -519,6 +544,7 @@ class EXPORT_OT_skc(Operator, ExportHelper):
             armature_obj=obj,
             swap_yz=self.swap_yz,
             scale=self.scale,
+            version=int(self.version)
         )
         
         if success:
@@ -538,6 +564,10 @@ class EXPORT_OT_skc(Operator, ExportHelper):
         box.label(text="Transform", icon='ORIENTATION_GLOBAL')
         box.prop(self, "scale")
         box.prop(self, "swap_yz")
+
+        box = layout.box()
+        box.label(text="Format", icon='FILE')
+        box.prop(self, "version")
 
 
 # =============================================================================
