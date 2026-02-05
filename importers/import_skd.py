@@ -478,7 +478,35 @@ class SKDImporter:
         bone_positions = self.bone_world_positions
         scale = self.scale
         swap_yz = self.swap_yz
-        Vector_cls = Vector
+
+        # Pre-calculate flattened matrices for faster access in loop
+        # list index = bone_index
+        # value = (pos_x, pos_y, pos_z, m00, m01, m02, m10, m11, m12, m20, m21, m22)
+        # or None if not computed
+        max_bone_idx = max(bone_matrices.keys()) if bone_matrices else -1
+        max_bone_idx = max(max_bone_idx, max(bone_positions.keys()) if bone_positions else -1)
+
+        fast_bone_transforms = [None] * (max_bone_idx + 1)
+
+        for b_idx in range(max_bone_idx + 1):
+            if b_idx in bone_matrices:
+                pos, rot = bone_matrices[b_idx]
+                # rot is Matrix 3x3
+                fast_bone_transforms[b_idx] = (
+                    pos.x, pos.y, pos.z,
+                    rot[0][0], rot[0][1], rot[0][2],
+                    rot[1][0], rot[1][1], rot[1][2],
+                    rot[2][0], rot[2][1], rot[2][2]
+                )
+            elif b_idx in bone_positions:
+                pos = bone_positions[b_idx]
+                # Identity rotation
+                fast_bone_transforms[b_idx] = (
+                    pos[0], pos[1], pos[2],
+                    1.0, 0.0, 0.0,
+                    0.0, 1.0, 0.0,
+                    0.0, 0.0, 1.0
+                )
 
         vertex_offset = 0
         
@@ -497,32 +525,32 @@ class SKDImporter:
                     bone_idx = weight.bone_index
                     w = weight.bone_weight
 
-                    if bone_idx in bone_matrices:
-                        # Get bone world transform
-                        bone_world_pos, bone_world_rot = bone_matrices[bone_idx]
-                        
-                        # Transform: rotate offset by bone matrix, then add bone position
-                        # We still need Vector for matrix multiplication, but we accumulate scalars
-                        v = bone_world_rot @ Vector_cls(weight.offset)
+                    if bone_idx < len(fast_bone_transforms):
+                        transform = fast_bone_transforms[bone_idx]
+                        if transform:
+                            # Unpack transform
+                            # bx, by, bz = bone pos
+                            # r00..r22 = rotation matrix
+                            bx, by, bz, r00, r01, r02, r10, r11, r12, r20, r21, r22 = transform
 
-                        pos_x += (v.x + bone_world_pos.x) * w
-                        pos_y += (v.y + bone_world_pos.y) * w
-                        pos_z += (v.z + bone_world_pos.z) * w
-                        
-                    elif bone_idx in bone_positions:
-                        # Fallback: just position (no rotation)
-                        bone_pos_tuple = bone_positions[bone_idx]
-                        off_x, off_y, off_z = weight.offset
+                            ox, oy, oz = weight.offset
 
-                        pos_x += (bone_pos_tuple[0] + off_x) * w
-                        pos_y += (bone_pos_tuple[1] + off_y) * w
-                        pos_z += (bone_pos_tuple[2] + off_z) * w
-                    else:
-                        # Last fallback: just use weight offset
-                        off_x, off_y, off_z = weight.offset
-                        pos_x += off_x * w
-                        pos_y += off_y * w
-                        pos_z += off_z * w
+                            # Rotate offset manually
+                            rx = r00*ox + r01*oy + r02*oz
+                            ry = r10*ox + r11*oy + r12*oz
+                            rz = r20*ox + r21*oy + r22*oz
+
+                            # Add bone pos and apply weight
+                            pos_x += (rx + bx) * w
+                            pos_y += (ry + by) * w
+                            pos_z += (rz + bz) * w
+                            continue
+
+                    # Fallback (should normally be covered by fast_bone_transforms if indices are correct)
+                    off_x, off_y, off_z = weight.offset
+                    pos_x += off_x * w
+                    pos_y += off_y * w
+                    pos_z += off_z * w
 
                 # Inline transform (matches _transform_position logic)
                 # MoHAA: Y-forward, Z-up -> Blender: Y-back, Z-up
