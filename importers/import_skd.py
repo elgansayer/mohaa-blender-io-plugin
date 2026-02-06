@@ -70,6 +70,7 @@ class SKDImporter:
         self.mesh_obj: Optional[bpy.types.Object] = None
         self.bone_name_map: Dict[str, str] = {}  # Original name -> Blender name
         self.bone_world_positions: Dict[int, Tuple[float, float, float]] = {}  # bone_index -> world pos (RAW)
+        self.bone_world_matrices: Dict[int, Tuple[Vector, Matrix]] = {}
     
     def execute(self) -> Tuple[Optional[bpy.types.Object], Optional[bpy.types.Object]]:
         """
@@ -480,6 +481,18 @@ class SKDImporter:
         swap_yz = self.swap_yz
         Vector_cls = Vector
 
+        # Pre-process matrices for faster access (avoid Vector/Matrix overhead in loop)
+        # Format: bone_idx -> ( (r00, r01, r02), (r10, r11, r12), (r20, r21, r22), (px, py, pz) )
+        fast_matrices = {}
+        if bone_matrices:
+            for b_idx, (pos, rot) in bone_matrices.items():
+                fast_matrices[b_idx] = (
+                    (rot[0][0], rot[0][1], rot[0][2]),
+                    (rot[1][0], rot[1][1], rot[1][2]),
+                    (rot[2][0], rot[2][1], rot[2][2]),
+                    (pos.x, pos.y, pos.z)
+                )
+
         vertex_offset = 0
         
         for surf_idx, surface in enumerate(self.model.surfaces):
@@ -497,17 +510,20 @@ class SKDImporter:
                     bone_idx = weight.bone_index
                     w = weight.bone_weight
 
-                    if bone_idx in bone_matrices:
-                        # Get bone world transform
-                        bone_world_pos, bone_world_rot = bone_matrices[bone_idx]
+                    if bone_idx in fast_matrices:
+                        # Unpack optimized matrix rows and position
+                        r0, r1, r2, b_pos = fast_matrices[bone_idx]
+                        off_x, off_y, off_z = weight.offset
                         
-                        # Transform: rotate offset by bone matrix, then add bone position
-                        # We still need Vector for matrix multiplication, but we accumulate scalars
-                        v = bone_world_rot @ Vector_cls(weight.offset)
+                        # Manually rotate and translate
+                        # v = rot @ offset + pos
+                        vx = (r0[0]*off_x + r0[1]*off_y + r0[2]*off_z) + b_pos[0]
+                        vy = (r1[0]*off_x + r1[1]*off_y + r1[2]*off_z) + b_pos[1]
+                        vz = (r2[0]*off_x + r2[1]*off_y + r2[2]*off_z) + b_pos[2]
 
-                        pos_x += (v.x + bone_world_pos.x) * w
-                        pos_y += (v.y + bone_world_pos.y) * w
-                        pos_z += (v.z + bone_world_pos.z) * w
+                        pos_x += vx * w
+                        pos_y += vy * w
+                        pos_z += vz * w
                         
                     elif bone_idx in bone_positions:
                         # Fallback: just position (no rotation)
